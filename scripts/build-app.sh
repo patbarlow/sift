@@ -36,6 +36,11 @@ if [ -d "$BIN_DIR/Sparkle.framework" ]; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Sift" 2>/dev/null || true
 fi
 
+# App icon: compile the iconset into AppIcon.icns (referenced by Info.plist).
+if [ -d Resources/AppIcon.iconset ]; then
+    iconutil -c icns Resources/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,6 +52,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>          <string>1</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleExecutable</key>       <string>Sift</string>
+    <key>CFBundleIconFile</key>         <string>AppIcon</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
     <key>LSMinimumSystemVersion</key>   <string>14.0</string>
     <key>LSUIElement</key>              <true/>
