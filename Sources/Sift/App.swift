@@ -104,6 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if state.hasConfigured {
             state.startScheduler()
+        } else {
+            // It's a menu-bar app (no Dock icon, no window on launch), so a new
+            // user who opens it would otherwise see nothing. Surface onboarding.
+            NSApp.activate(ignoringOtherApps: true)
+            window.show(near: statusItem.button)
         }
 
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
