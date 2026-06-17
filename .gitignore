@@ -1,0 +1,43 @@
+# === Secrets & local config — never commit ===
+.env
+.env.*
+*.env
+.dev.vars
+*.dev.vars
+.mcp.json
+secrets/
+*.p12
+*.cer
+*.mobileprovision
+
+# AI assistant / agent instructions (local only)
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/
+.cursor/
+
+# Cloudflare worker — local state & secrets (worker code in src/ is fine)
+cloudflare-worker/.wrangler/
+cloudflare-worker/.dev.vars
+cloudflare-worker/node_modules/
+
+# === Build output / artifacts ===
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+# Built, signed app bundle — distributed via Releases, not source
+Sift.app/
+
+# === macOS / scratch ===
+.DS_Store
+tmp/
+.playground/
+
+# Local code-signing identity (your name/cert — never commit)
+scripts/.signing
+
+# Hosted Slack OAuth worker — kept local, deployed separately, not in the repo
+cloudflare-worker/
