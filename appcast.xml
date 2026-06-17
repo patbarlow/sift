@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Sift</title>
+    <description>Updates for Sift.</description>
+    <language>en</language>
+    <!-- RELEASES: release.sh inserts the newest <item> directly below this line. -->
+  </channel>
+</rss>

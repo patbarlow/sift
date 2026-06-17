@@ -15,10 +15,17 @@ IDENTITY="${IDENTITY:--}"
 swift build
 osascript -e 'quit app "Sift"' 2>/dev/null || true
 sleep 1
+mkdir -p Sift.app/Contents/Frameworks
 cp .build/debug/Sift Sift.app/Contents/MacOS/Sift
 if [ -d .build/debug/Sift_Sift.bundle ]; then
   cp -R .build/debug/Sift_Sift.bundle Sift.app/Contents/Resources/
 fi
-codesign --force --sign "$IDENTITY" Sift.app
+# Refresh the embedded Sparkle.framework and point the fresh binary at it.
+if [ -d .build/debug/Sparkle.framework ]; then
+  rm -rf Sift.app/Contents/Frameworks/Sparkle.framework
+  cp -R .build/debug/Sparkle.framework Sift.app/Contents/Frameworks/
+  install_name_tool -add_rpath "@executable_path/../Frameworks" Sift.app/Contents/MacOS/Sift 2>/dev/null || true
+fi
+codesign --deep --force --sign "$IDENTITY" Sift.app
 open Sift.app
 echo "deployed + signed"

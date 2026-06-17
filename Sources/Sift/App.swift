@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import AppKit
 import Combine
+import Sparkle
 
 @main
 struct SiftApp: App {
@@ -34,6 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var diagnosticWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+
+    // Auto-updates via Sparkle. Starts the updater (background checks honour
+    // SUEnableAutomaticChecks in Info.plist); "Check for Updates…" is in the menu.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
     // "O then <key>" navigation: press O to arm, then a letter to jump.
     private var navArmed = false
@@ -170,6 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let syncItem = NSMenuItem(title: "Sync now", action: #selector(syncNow), keyEquivalent: "r")
         syncItem.target = self
         menu.addItem(syncItem)
+        let updatesItem = NSMenuItem(title: "Check for Updates…",
+                                     action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                                     keyEquivalent: "")
+        updatesItem.target = updaterController
+        menu.addItem(updatesItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Sift",
                                 action: #selector(NSApplication.terminate(_:)),

@@ -20,7 +20,7 @@ BIN="$BIN_DIR/Sift"
 APP="$PWD/Sift.app"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/Sift"
 
 # SwiftPM emits resources into a `<TargetName>_<Module>.bundle` next to the
@@ -29,6 +29,12 @@ for bundle in "$BIN_DIR"/*.bundle; do
     [ -e "$bundle" ] || continue
     cp -R "$bundle" "$APP/Contents/Resources/"
 done
+
+# Embed Sparkle.framework (auto-updates) and point the binary at it.
+if [ -d "$BIN_DIR/Sparkle.framework" ]; then
+    cp -R "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Sift" 2>/dev/null || true
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,6 +51,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>   <string>14.0</string>
     <key>LSUIElement</key>              <true/>
     <key>NSHighResolutionCapable</key>  <true/>
+    <key>SUFeedURL</key>                <string>https://raw.githubusercontent.com/patbarlow/sift/main/appcast.xml</string>
+    <key>SUPublicEDKey</key>            <string>DXaM+fPfK1BV4Q2ZFL72kY2QAEkgduZvo+77jYb5Dnk=</string>
+    <key>SUEnableAutomaticChecks</key>  <true/>
+    <key>SUScheduledCheckInterval</key> <integer>86400</integer>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

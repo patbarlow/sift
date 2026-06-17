@@ -41,3 +41,6 @@ scripts/.signing
 
 # Hosted Slack OAuth worker — kept local, deployed separately, not in the repo
 cloudflare-worker/
+
+# Release build output (zips) — published to GitHub Releases, not committed
+dist/
