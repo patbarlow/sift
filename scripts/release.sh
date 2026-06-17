@@ -19,7 +19,9 @@ cd "$(dirname "$0")/.."
 
 VERSION="${1:?Usage: $0 <version>   e.g. $0 0.2.0}"
 BUILD="$(git rev-list --count HEAD)"
-IDENTITY="${SIFT_SIGN_IDENTITY:-$(cat scripts/.signing 2>/dev/null || true)}"
+# Releases must be signed with a Developer ID Application cert (not the
+# Apple Development cert deploy.sh uses). Auto-detect it from the Keychain.
+IDENTITY="${SIFT_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | grep -m1 'Developer ID Application' | sed -E 's/.*"(.*)"/\1/')}"
 NOTARY_PROFILE="${SIFT_NOTARY_PROFILE:-sift-notary}"
 REPO="patbarlow/sift"
 APP="Sift.app"
