@@ -15,12 +15,11 @@ final class AppState: ObservableObject {
     enum ActiveTask: String { case sync, reevaluate, consolidate, memory }
     @Published var lastError: String?
     @Published var hasConfigured: Bool
-    @Published var expandedTodoID: PersistentIdentifier?
     @Published var mainTab: MainTab = .todos
     // The confirm/input modal shown over the main window (nil = hidden).
     @Published var modal: SiftModalConfig?
-    // The Slack thread reader sheet (nil = hidden).
-    @Published var threadSheet: ThreadSheetRequest?
+    // The focused single-todo detail view (nil = hidden).
+    @Published var detailTodo: Todo?
 
     private var syncTimer: Timer?
     private var wakeObserver: Any?
@@ -297,17 +296,6 @@ final class AppState: ObservableObject {
         return "\(channel):\(secs).\(micros)"
     }
 
-    /// Open the in-app Slack thread reader for a "channelID:parentTs" key. Falls
-    /// back to opening the permalink externally if the key can't be parsed.
-    func openThread(forKey key: String, title: String, url: URL?) {
-        let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
-            if let url { NSWorkspace.shared.open(url) }
-            return
-        }
-        threadSheet = ThreadSheetRequest(channelID: parts[0], parentTs: parts[1], title: title, slackURL: url)
-    }
-
     private func applySnooze(_ todo: Todo, activity: ActivityKind? = nil, _ mutate: @escaping (Todo) -> Void) {
         let id = todo.persistentModelID
         Task { @MainActor in
@@ -474,12 +462,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    func toggleExpanded(_ todo: Todo) {
-        if expandedTodoID == todo.persistentModelID {
-            expandedTodoID = nil
-        } else {
-            expandedTodoID = todo.persistentModelID
-        }
+    /// Open the focused single-todo detail view.
+    func openDetail(_ todo: Todo) {
+        detailTodo = todo
     }
 }
 

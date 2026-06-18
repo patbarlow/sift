@@ -116,7 +116,7 @@ struct MenuBarContent: View {
         // won't otherwise re-evaluate in views whose inputs didn't change.
         .id(settings.themeID)
         .siftModal($state.modal)
-        .siftThreadSheet($state.threadSheet)
+        .siftTodoDetail($state.detailTodo)
     }
 
     @ViewBuilder
@@ -231,7 +231,6 @@ struct TodosScrollView: View {
             .padding(.horizontal, 16)
             .padding(.top, 16)
             .padding(.bottom, 22)
-            .animation(.easeInOut(duration: 0.22), value: state.expandedTodoID)
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -445,7 +444,6 @@ struct SnoozedScrollView: View {
             .padding(.horizontal, 16)
             .padding(.top, 16)
             .padding(.bottom, 22)
-            .animation(.easeInOut(duration: 0.22), value: state.expandedTodoID)
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -649,17 +647,17 @@ struct ArchivedRow: View {
             }
             .padding(.leading, IssueRow.gutter)
         }
+        .contentShape(Rectangle())
+        .onTapGesture { state.openDetail(todo) }
         .rowHover()
         .siftContextMenu { dismiss in
+            SiftMenuItem(title: "Open", systemImage: "rectangle.on.rectangle") {
+                state.openDetail(todo); dismiss()
+            }
             if let url = todo.sourceURL {
-                if todo.sourceKind == .granola {
-                    SiftMenuItem(title: "Open Granola note", systemImage: "note.text") {
-                        NSWorkspace.shared.open(url); dismiss()
-                    }
-                } else {
-                    SiftMenuItem(title: "View thread", systemImage: "bubble.left") {
-                        state.openThread(forKey: todo.threadKey, title: todo.channelName, url: url); dismiss()
-                    }
+                SiftMenuItem(title: todo.sourceKind == .granola ? "Open Granola note" : "Open in Slack",
+                             systemImage: todo.sourceKind == .granola ? "note.text" : "bubble.left") {
+                    NSWorkspace.shared.open(url); dismiss()
                 }
             }
             SiftMenuItem(title: "Restore (re-open)", systemImage: "arrow.uturn.backward") {
@@ -902,29 +900,17 @@ struct IssueRow: View {
     @EnvironmentObject var settings: AppSettings
     @State private var checkHovering = false
 
-    private var isExpanded: Bool { state.expandedTodoID == todo.persistentModelID }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            mainRow
-            if isExpanded {
-                DetailPanel(todo: todo)
-                    .padding(.top, 10)
-                    .padding(.leading, 28)
-                    .transition(.opacity)
-            }
-        }
+        mainRow
         .rowHover()
         .siftContextMenu { dismiss in
+            SiftMenuItem(title: "Open", systemImage: "rectangle.on.rectangle") {
+                state.openDetail(todo); dismiss()
+            }
             if let url = todo.sourceURL {
-                if todo.sourceKind == .granola {
-                    SiftMenuItem(title: "Open Granola note", systemImage: "note.text") {
-                        NSWorkspace.shared.open(url); dismiss()
-                    }
-                } else {
-                    SiftMenuItem(title: "View thread", systemImage: "bubble.left") {
-                        state.openThread(forKey: todo.threadKey, title: todo.channelName, url: url); dismiss()
-                    }
+                SiftMenuItem(title: todo.sourceKind == .granola ? "Open Granola note" : "Open in Slack",
+                             systemImage: todo.sourceKind == .granola ? "note.text" : "bubble.left") {
+                    NSWorkspace.shared.open(url); dismiss()
                 }
             }
             SiftMenuItem(title: "Mark done", systemImage: "checkmark.circle") {
@@ -999,13 +985,14 @@ struct IssueRow: View {
     }
 
     /// Indent for everything under the title line — checkbox (16) + its
-    /// trailing pad (6) + the line's spacing (6). The detail panel uses it too.
+    /// trailing pad (6) + the line's spacing (6).
     static let gutter: CGFloat = 28
 
     private var mainRow: some View {
         // The checkbox sits IN the title line and the whole line is
-        // center-aligned, so circle, priority icon, title, pills, and chevron
-        // share one vertical axis. Summary and sources indent to the gutter.
+        // center-aligned, so circle, priority icon, title, and pills share one
+        // vertical axis. Summary and sources indent to the gutter. Tapping the
+        // row (outside the checkbox) opens the focused detail view.
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Button(action: { state.markDone(todo) }) {
@@ -1037,12 +1024,9 @@ struct IssueRow: View {
                 if todo.isInProgress && !todo.isSnoozed { InProgressBadge() }
                 if todo.isStale { StaleBadge() }
                 Spacer(minLength: 0)
-                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
             }
             .contentShape(Rectangle())
-            .onTapGesture { state.toggleExpanded(todo) }
+            .onTapGesture { state.openDetail(todo) }
 
             VStack(alignment: .leading, spacing: 4) {
                 if !todo.summary.isEmpty {
@@ -1056,7 +1040,7 @@ struct IssueRow: View {
             }
             .padding(.leading, Self.gutter)
             .contentShape(Rectangle())
-            .onTapGesture { state.toggleExpanded(todo) }
+            .onTapGesture { state.openDetail(todo) }
         }
     }
 }
@@ -1079,44 +1063,18 @@ private struct SingleSourcePill: View {
     let pill: Todo.SourcePill
     let font: Font
     var redacted: Bool = false
-    @EnvironmentObject var state: AppState
-    @State private var hovering = false
-
-    private var isOpenable: Bool { pill.url != nil }
 
     var body: some View {
-        let label = redacted ? pill.label.redacting(true) : pill.label
-        let content = HStack(spacing: 4) {
+        // A static channel/source indicator — tapping the row opens the detail
+        // view, so the pill doesn't carry its own action.
+        HStack(spacing: 4) {
             sourceIcon
-            Text(label).font(font)
+            Text(redacted ? pill.label.redacting(true) : pill.label).font(font)
         }
-        .foregroundStyle(hovering && isOpenable ? Color.themeAccent : Color.secondary.opacity(0.75))
+        .foregroundStyle(Color.secondary.opacity(0.75))
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(
-            Capsule().solidTint(hovering && isOpenable ? Color.themeAccent.opacity(0.12) : Color.secondary.opacity(0.08))
-        )
-
-        if isOpenable {
-            Button(action: open) { content }
-                .buttonStyle(.plain)
-                .onHover { h in
-                    hovering = h
-                    if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                }
-        } else {
-            content
-        }
-    }
-
-    /// Slack sources open the in-app thread reader; Granola notes open externally.
-    private func open() {
-        switch pill.kind {
-        case .slackChannel, .slackDM:
-            state.openThread(forKey: pill.id, title: pill.label, url: pill.url)
-        case .granola:
-            if let url = pill.url { NSWorkspace.shared.open(url) }
-        }
+        .background(Capsule().solidTint(Color.secondary.opacity(0.08)))
     }
 
     @ViewBuilder
@@ -1323,7 +1281,6 @@ struct MergedSourceRow: View {
     let source: TodoSource
     let redacted: Bool
     let onUnmerge: () -> Void
-    @EnvironmentObject var state: AppState
     @State private var hovering = false
 
     var body: some View {
@@ -1339,16 +1296,10 @@ struct MergedSourceRow: View {
             Spacer(minLength: 6)
             HStack(spacing: 2) {
                 if let url = source.sourceURL {
-                    SiftButton(variant: .subtle, iconOnly: true) {
-                        if source.sourceKind == .granola {
-                            NSWorkspace.shared.open(url)
-                        } else {
-                            state.openThread(forKey: source.threadKey, title: source.sourceLabel, url: url)
-                        }
-                    } content: {
+                    SiftButton(variant: .subtle, iconOnly: true) { NSWorkspace.shared.open(url) } content: {
                         IntegrationLogoView(logo: source.sourceKind == .granola ? .granola : .slack, size: 14)
                     }
-                    .help(source.sourceKind == .granola ? "Open Granola note" : "View thread")
+                    .help(source.sourceKind == .granola ? "Open Granola note" : "Open in Slack")
                 }
                 SiftButton(variant: .subtle, iconOnly: true, action: onUnmerge) {
                     Image(systemName: "arrow.uturn.backward").font(.system(size: 11, weight: .medium))

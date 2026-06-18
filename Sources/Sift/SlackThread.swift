@@ -1,19 +1,6 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Request
-
-/// What the thread sheet needs to open: the channel + parent ts to fetch, a
-/// label for the header, and the Slack permalink for the "Open in Slack" button.
-/// Holds no token — the loader reads that from Keychain when it fetches.
-struct ThreadSheetRequest: Identifiable, Equatable {
-    let id = UUID()
-    let channelID: String
-    let parentTs: String
-    let title: String
-    let slackURL: URL?
-}
-
 // MARK: - Rendered message
 
 struct ThreadMessage: Identifiable {
@@ -249,26 +236,34 @@ enum SlackText {
     }
 }
 
-// MARK: - Sheet
+// MARK: - Detail sheet
 
-/// A dimmed overlay hosting a scrollable rendering of a Slack thread: avatars,
-/// names, timestamps, formatted text, and reactions. Tap-out or Esc to close.
-struct ThreadSheet: View {
-    let request: ThreadSheetRequest
+/// A dimmed overlay hosting the focused single-todo view: a main column with the
+/// title, summary, and Slack thread, and a slim sidebar of properties (priority,
+/// recent activity, merged sources). Tap-out or Esc to close.
+struct TodoDetailSheet: View {
+    let todo: Todo
     let onClose: () -> Void
     @StateObject private var loader: ThreadLoader
     @EnvironmentObject var settings: AppSettings
     @State private var contentHeight: CGFloat = 0
 
-    /// Keep the sheet comfortably inside the window rather than filling it.
-    static let maxWidth: CGFloat = 460
-    static let maxBodyHeight: CGFloat = 440
+    /// Keep the sheet inside the window, and let it hug short content.
+    static let maxWidth: CGFloat = 540
+    static let maxBodyHeight: CGFloat = 520
+    static let sidebarWidth: CGFloat = 210
 
-    init(request: ThreadSheetRequest, onClose: @escaping () -> Void) {
-        self.request = request
+    init(todo: Todo, onClose: @escaping () -> Void) {
+        self.todo = todo
         self.onClose = onClose
-        _loader = StateObject(wrappedValue: ThreadLoader(channelID: request.channelID, parentTs: request.parentTs))
+        let parts = todo.threadKey.split(separator: ":", maxSplits: 1).map(String.init)
+        _loader = StateObject(wrappedValue: ThreadLoader(
+            channelID: parts.first ?? todo.channelID,
+            parentTs: parts.count > 1 ? parts[1] : ""
+        ))
     }
+
+    private var isSlack: Bool { todo.sourceKind != .granola }
 
     var body: some View {
         ZStack {
@@ -278,9 +273,17 @@ struct ThreadSheet: View {
                 .onTapGesture { onClose() }
 
             VStack(spacing: 0) {
-                header
+                topBar
                 Divider().opacity(0.5)
-                bodyContent
+                HStack(alignment: .top, spacing: 0) {
+                    mainColumn
+                    Divider()
+                    sidebar
+                }
+                // Both columns report their natural height; the taller one drives
+                // the card, capped so long threads scroll instead of filling the window.
+                .frame(height: min(max(contentHeight, 1), Self.maxBodyHeight))
+                .onPreferenceChange(ThreadHeightKey.self) { contentHeight = $0 }
             }
             .frame(maxWidth: Self.maxWidth)
             .background(
@@ -292,20 +295,21 @@ struct ThreadSheet: View {
                     )
                     .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
             )
-            .padding(20)
+            .padding(16)
         }
-        .task { await loader.load() }
+        .task { if isSlack { await loader.load() } }
     }
 
-    private var header: some View {
+    private var topBar: some View {
         HStack(spacing: 8) {
-            IntegrationLogoView(logo: .slack, size: 15)
-            Text(request.title)
-                .font(.headline)
+            IntegrationLogoView(logo: isSlack ? .slack : .granola, size: 15)
+            Text(todo.channelName.redacting(settings.redactionEnabled))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            if let url = request.slackURL {
-                SiftButton("Open in Slack", leading: "arrow.right.circle", variant: .secondary) {
+            if let url = todo.sourceURL {
+                SiftButton(isSlack ? "Open in Slack" : "Open note", leading: "arrow.right.circle", variant: .secondary) {
                     NSWorkspace.shared.open(url)
                 }
             }
@@ -313,37 +317,70 @@ struct ThreadSheet: View {
                 .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .padding(.vertical, 10)
+    }
+
+    /// Left: title, summary, then the thread itself.
+    private var mainColumn: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(todo.title.redacting(settings.redactionEnabled))
+                    .font(.system(size: 15, weight: .semibold, design: settings.theme.fontDesign))
+                    .foregroundStyle(Color.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !todo.summary.isEmpty {
+                    Text(todo.displaySummary.redacting(settings.redactionEnabled))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider().opacity(0.4).padding(.vertical, 2)
+                threadSection
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: ThreadHeightKey.self, value: proxy.size.height)
+            })
+        }
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
-    private var bodyContent: some View {
-        if loader.loading && loader.messages.isEmpty {
-            SiftSpinner().frame(maxWidth: .infinity).frame(height: 120)
+    private var threadSection: some View {
+        if !isSlack {
+            Text("This item came from a Granola note — use “Open note” above to view it.")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if loader.loading && loader.messages.isEmpty {
+            HStack { Spacer(); SiftSpinner(); Spacer() }.frame(height: 80)
         } else if let error = loader.error {
-            VStack(spacing: 8) {
-                LucideIcon(sf: "exclamationmark.circle", size: 22).foregroundStyle(.secondary)
-                Text(error).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Couldn’t load the thread").font(.system(size: 12, weight: .medium))
+                Text(error).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 130)
-            .padding(.horizontal, 24)
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(loader.messages) { msg in
-                        ThreadMessageRow(message: msg, redacted: settings.redactionEnabled)
-                    }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(loader.messages) { msg in
+                    ThreadMessageRow(message: msg, redacted: settings.redactionEnabled)
                 }
-                .padding(.vertical, 8)
+            }
+        }
+    }
+
+    /// Right: the existing detail panel (priority, recent activity, merged sources).
+    private var sidebar: some View {
+        ScrollView {
+            DetailPanel(todo: todo)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .background(GeometryReader { proxy in
                     Color.clear.preference(key: ThreadHeightKey.self, value: proxy.size.height)
                 })
-            }
-            // Hug the content, but never grow past the cap (then it scrolls).
-            .frame(height: min(max(contentHeight, 1), Self.maxBodyHeight))
-            .onPreferenceChange(ThreadHeightKey.self) { contentHeight = $0 }
         }
+        .frame(width: Self.sidebarWidth)
     }
 }
 
@@ -386,7 +423,6 @@ private struct ThreadMessageRow: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
         .padding(.top, message.startsGroup ? 10 : 2)
         .padding(.bottom, 2)
     }
@@ -507,12 +543,12 @@ private struct ThreadAvatar: View {
 }
 
 extension View {
-    /// Presents a `ThreadSheet` over this view while `request` is non-nil.
-    func siftThreadSheet(_ request: Binding<ThreadSheetRequest?>) -> some View {
+    /// Presents the focused `TodoDetailSheet` while `todo` is non-nil.
+    func siftTodoDetail(_ todo: Binding<Todo?>) -> some View {
         overlay {
-            if let req = request.wrappedValue {
-                ThreadSheet(request: req) { request.wrappedValue = nil }
-                    .id(req.id)
+            if let t = todo.wrappedValue {
+                TodoDetailSheet(todo: t) { todo.wrappedValue = nil }
+                    .id(t.persistentModelID)
             }
         }
     }
