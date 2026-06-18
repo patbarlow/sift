@@ -248,9 +248,12 @@ struct TodoDetailSheet: View {
     @EnvironmentObject var settings: AppSettings
     @State private var contentHeight: CGFloat = 0
 
-    /// Keep the sheet inside the window, and let it hug short content.
+    /// Keep the sheet inside the window, and let it hug short content. The body
+    /// (everything below the fixed title) scrolls past `maxBodyHeight`;
+    /// `headerReserve` approximates the title header for the top-pin maths.
     static let maxWidth: CGFloat = 544
-    static let maxBodyHeight: CGFloat = 620
+    static let maxBodyHeight: CGFloat = 560
+    static let headerReserve: CGFloat = 64
 
     init(todo: Todo, onClose: @escaping () -> Void) {
         self.todo = todo
@@ -275,24 +278,8 @@ struct TodoDetailSheet: View {
             // todo only moves its bottom edge — switching todos loads and
             // expands downward instead of growing from the middle.
             GeometryReader { geo in
-                content
+                card
                     .frame(maxWidth: Self.maxWidth)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.themeCard)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                            )
-                            .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
-                    )
-                    // Close floats in the corner — no header strip, so the title
-                    // can sit at the very top.
-                    .overlay(alignment: .topTrailing) {
-                        SiftButton(leading: "xmark", variant: .subtle, action: onClose)
-                            .keyboardShortcut(.cancelAction)
-                            .padding(8)
-                    }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, topInset(geo.size.height))
             }
@@ -300,20 +287,50 @@ struct TodoDetailSheet: View {
         .task { if isSlack { await loader.load() } }
     }
 
-    /// Top margin that keeps the card vertically centred *as if* it were at max
-    /// height, so its top edge stays fixed no matter how tall the content is.
+    /// Top margin that keeps the card's top edge fixed regardless of content
+    /// height (centred as if it were at its maximum size).
     private func topInset(_ available: CGFloat) -> CGFloat {
-        max(16, (available - Self.maxBodyHeight) / 2)
+        max(16, (available - Self.maxBodyHeight - Self.headerReserve) / 2)
     }
 
-    private var content: some View {
+    private var card: some View {
+        VStack(spacing: 0) {
+            header
+            Divider().opacity(0.4)
+            scrollBody
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.themeCard)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+        )
+    }
+
+    /// Fixed header: the title (up to two lines, then truncated) plus close.
+    private var header: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(todo.title.redacting(settings.redactionEnabled))
+                .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
+                .foregroundStyle(Color.primary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            SiftButton(leading: "xmark", variant: .subtle, action: onClose)
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+    }
+
+    /// Everything below the fixed title scrolls.
+    private var scrollBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Text(todo.title.redacting(settings.redactionEnabled))
-                    .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
-                    .foregroundStyle(Color.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.trailing, 30)   // clear the floating close button
                 if !todo.summary.isEmpty {
                     Text(todo.displaySummary.redacting(settings.redactionEnabled))
                         .font(.system(size: 13))
@@ -324,7 +341,7 @@ struct TodoDetailSheet: View {
                 if isSlack { threadContainer } else { granolaNote }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 16)
+            .padding(.top, 14)
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(GeometryReader { proxy in

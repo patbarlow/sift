@@ -1063,18 +1063,33 @@ private struct SingleSourcePill: View {
     let pill: Todo.SourcePill
     let font: Font
     var redacted: Bool = false
+    @State private var hovering = false
 
     var body: some View {
-        // A static channel/source indicator — tapping the row opens the detail
-        // view, so the pill doesn't carry its own action.
-        HStack(spacing: 4) {
+        // Clickable: takes you straight to the source (Slack thread / Granola
+        // note). Tapping the rest of the row opens the detail view instead.
+        let hasLink = pill.url != nil
+        let content = HStack(spacing: 4) {
             sourceIcon
             Text(redacted ? pill.label.redacting(true) : pill.label).font(font)
         }
-        .foregroundStyle(Color.secondary.opacity(0.75))
+        .foregroundStyle(hovering && hasLink ? Color.themeAccent : Color.secondary.opacity(0.75))
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(Capsule().solidTint(Color.secondary.opacity(0.08)))
+        .background(
+            Capsule().solidTint(hovering && hasLink ? Color.themeAccent.opacity(0.12) : Color.secondary.opacity(0.08))
+        )
+
+        if let url = pill.url {
+            Button { NSWorkspace.shared.open(url) } label: { content }
+                .buttonStyle(.plain)
+                .onHover { h in
+                    hovering = h
+                    if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+        } else {
+            content
+        }
     }
 
     @ViewBuilder
