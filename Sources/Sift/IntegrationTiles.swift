@@ -39,7 +39,7 @@ enum IntegrationLogo {
         case .groq: name = "groq"
         case .deepseek: name = "deepseek"
         }
-        guard let url = Bundle.module.url(forResource: name, withExtension: "svg") else {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "svg") else {
             return nil
         }
         return NSImage(contentsOf: url)

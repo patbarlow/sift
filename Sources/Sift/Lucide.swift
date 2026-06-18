@@ -68,7 +68,7 @@ enum Lucide {
     static func image(forSF sf: String) -> NSImage? {
         guard let file = map[sf] else { return nil }
         if let cached = cache[file] { return cached }
-        guard let url = Bundle.module.url(forResource: "lucide-\(file)", withExtension: "svg"),
+        guard let url = Bundle.main.url(forResource: "lucide-\(file)", withExtension: "svg"),
               let img = NSImage(contentsOf: url) else { return nil }
         img.isTemplate = true
         cache[file] = img

@@ -17,9 +17,11 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources/Sift",
-            resources: [
-                .process("Resources")
-            ]
+            // Resources are copied straight into the .app's Contents/Resources by
+            // the build scripts and loaded via Bundle.main — not via a SwiftPM
+            // resource bundle, whose accessor bakes in a machine-specific build
+            // path and looks in the wrong place inside a hand-assembled .app.
+            exclude: ["Resources"]
         )
     ]
 )

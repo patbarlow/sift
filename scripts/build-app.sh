@@ -12,10 +12,13 @@ case "$CONFIG" in
     *) echo "Usage: $0 [release|debug]"; exit 1 ;;
 esac
 
-echo "Building ($CONFIG)…"
-swift build $FLAG
+# Universal binary so it runs on both Apple Silicon and Intel Macs.
+ARCHS="--arch arm64 --arch x86_64"
 
-BIN_DIR=$(swift build $FLAG --show-bin-path)
+echo "Building ($CONFIG, universal)…"
+swift build $FLAG $ARCHS
+
+BIN_DIR=$(swift build $FLAG $ARCHS --show-bin-path)
 BIN="$BIN_DIR/Sift"
 APP="$PWD/Sift.app"
 
@@ -23,12 +26,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/Sift"
 
-# SwiftPM emits resources into a `<TargetName>_<Module>.bundle` next to the
-# binary. Copy it into the app so `Bundle.module` resolves at runtime.
-for bundle in "$BIN_DIR"/*.bundle; do
-    [ -e "$bundle" ] || continue
-    cp -R "$bundle" "$APP/Contents/Resources/"
-done
+# Bundle the SVG assets straight into Contents/Resources, loaded via Bundle.main.
+cp Sources/Sift/Resources/*.svg "$APP/Contents/Resources/"
 
 # Embed Sparkle.framework (auto-updates) and point the binary at it.
 if [ -d "$BIN_DIR/Sparkle.framework" ]; then

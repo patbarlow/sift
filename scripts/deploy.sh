@@ -15,11 +15,9 @@ IDENTITY="${IDENTITY:--}"
 swift build
 osascript -e 'quit app "Sift"' 2>/dev/null || true
 sleep 1
-mkdir -p Sift.app/Contents/Frameworks
+mkdir -p Sift.app/Contents/Frameworks Sift.app/Contents/Resources
 cp .build/debug/Sift Sift.app/Contents/MacOS/Sift
-if [ -d .build/debug/Sift_Sift.bundle ]; then
-  cp -R .build/debug/Sift_Sift.bundle Sift.app/Contents/Resources/
-fi
+cp Sources/Sift/Resources/*.svg Sift.app/Contents/Resources/
 # Refresh the embedded Sparkle.framework and point the fresh binary at it.
 if [ -d .build/debug/Sparkle.framework ]; then
   rm -rf Sift.app/Contents/Frameworks/Sparkle.framework
