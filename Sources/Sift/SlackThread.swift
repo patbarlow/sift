@@ -36,8 +36,9 @@ struct ThreadFile: Identifiable, Hashable {
     let id: String
     let name: String
     let isImage: Bool
-    let thumbURL: URL?      // authed image URL (images only)
-    let permalink: URL?     // opened externally
+    let thumbURL: URL?      // authed thumbnail URL (images only)
+    let fullURL: URL?       // authed full-res URL, downloaded for Preview
+    let permalink: URL?     // opened externally (non-image files)
     let aspectRatio: CGFloat?
     let sizeText: String?
 }
@@ -183,9 +184,10 @@ final class ThreadLoader: ObservableObject {
             }()
             return ThreadFile(
                 id: f.id ?? f.permalink ?? UUID().uuidString,
-                name: f.title ?? f.name ?? "Attachment",
+                name: f.name ?? f.title ?? "Attachment",
                 isImage: f.isImage,
                 thumbURL: f.isImage ? thumb : nil,
+                fullURL: f.url_private.flatMap(URL.init(string:)),
                 permalink: (f.permalink ?? f.url_private).flatMap(URL.init(string:)),
                 aspectRatio: ratio,
                 sizeText: f.size.map(Self.byteString)
@@ -770,29 +772,50 @@ private struct ThreadFilesView: View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(files) { file in
                 if file.isImage, let thumb = file.thumbURL {
+                    // Size to the image's own aspect (scaledToFit), capped — no
+                    // forced box, so multiple images each render naturally.
                     AuthedImage(url: thumb) {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(Color.secondary.opacity(0.12))
+                            .frame(width: 220, height: 220 / (file.aspectRatio ?? 1.6))
                     }
-                    .aspectRatio(file.aspectRatio ?? 1.6, contentMode: .fit)
-                    .frame(maxWidth: 300, maxHeight: 240, alignment: .leading)
+                    .frame(maxWidth: 340, maxHeight: 380, alignment: .leading)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                     )
                     .contentShape(Rectangle())
-                    .onTapGesture { open(file) }
-                    .help(file.name)
+                    .onTapGesture { openInPreview(file) }
+                    .help("Open in Preview")
                 } else {
-                    FileChip(file: file) { open(file) }
+                    FileChip(file: file) {
+                        if let url = file.permalink { NSWorkspace.shared.open(url) }
+                    }
                 }
             }
         }
     }
 
-    private func open(_ file: ThreadFile) {
-        if let url = file.permalink { NSWorkspace.shared.open(url) }
+    /// Download the full-res image (token-authed) to a temp file and hand it to
+    /// the system previewer (Preview / Quick Look).
+    private func openInPreview(_ file: ThreadFile) {
+        guard let url = file.fullURL ?? file.thumbURL else {
+            if let permalink = file.permalink { NSWorkspace.shared.open(permalink) }
+            return
+        }
+        Task {
+            guard let token = Keychain.read(SecretKey.slack) else { return }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("SiftImages", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let destination = dir.appendingPathComponent(file.name)
+            guard (try? data.write(to: destination)) != nil else { return }
+            await MainActor.run { NSWorkspace.shared.open(destination) }
+        }
     }
 }
 
@@ -836,7 +859,7 @@ private struct AuthedImage<Placeholder: View>: View {
     var body: some View {
         Group {
             if let image {
-                Image(nsImage: image).resizable()
+                Image(nsImage: image).resizable().scaledToFit()
             } else {
                 placeholder()
             }
@@ -939,6 +962,50 @@ enum Emoji {
         "yellow_circle": "🟡", "large_yellow_circle": "🟡", "white_circle": "⚪", "black_circle": "⚫",
         "coffee": "☕", "beers": "🍻", "pizza": "🍕", "birthday": "🎂", "money_with_wings": "💸",
         "boom": "💥", "snail": "🐌", "turtle": "🐢", "hourglass": "⌛", "alarm_clock": "⏰",
+        // Faces
+        "confused": "😕", "neutral_face": "😐", "expressionless": "😑", "no_mouth": "😶",
+        "worried": "😟", "frowning": "😦", "anguished": "😧", "open_mouth": "😮", "hushed": "😯",
+        "flushed": "😳", "disappointed": "😞", "confounded": "😖", "persevere": "😣",
+        "tired_face": "😫", "weary": "😩", "unamused": "😒", "smirk": "😏", "smile_cat": "😸",
+        "sleeping": "😴", "sleepy": "😪", "relieved": "😌", "yum": "😋", "stuck_out_tongue": "😛",
+        "stuck_out_tongue_winking_eye": "😜", "stuck_out_tongue_closed_eyes": "😝",
+        "laughing": "😆", "satisfied": "😆", "sweat": "😓", "cold_sweat": "😰", "fearful": "😨",
+        "disappointed_relieved": "😥", "angry": "😠", "triumph": "😤",
+        "kissing_heart": "😘", "kissing": "😗", "innocent": "😇", "nerd_face": "🤓",
+        "money_mouth_face": "🤑", "zipper_mouth_face": "🤐", "face_with_raised_eyebrow": "🤨",
+        "rolling_on_the_floor_laughing": "🤣", "drooling_face": "🤤", "lying_face": "🤥",
+        "nauseated_face": "🤢", "sneezing_face": "🤧", "cowboy_hat_face": "🤠", "clown_face": "🤡",
+        "thermometer_face": "🤒", "smiling_face_with_tear": "🥲", "yawning_face": "🥱",
+        "hot_face": "🥵", "cold_face": "🥶", "woozy_face": "🥴",
+        "face_with_monocle": "🧐", "smiling_imp": "😈", "ghost": "👻", "alien": "👽", "poop": "💩",
+        // Hands & people
+        "raised_back_of_hand": "🤚", "vulcan_salute": "🖖",
+        "call_me_hand": "🤙", "fist": "✊", "facepunch": "👊", "fist_left": "🤛", "fist_right": "🤜",
+        "v": "✌️", "metal": "🤘", "writing_hand": "✍️", "nail_care": "💅", "selfie": "🤳",
+        "pinched_fingers": "🤌", "pinching_hand": "🤏", "open_hands": "👐", "palms_up_together": "🤲",
+        "raising_hand": "🙋", "person_facepalming": "🤦", "person_shrugging": "🤷",
+        "tipping_hand_person": "💁", "ok_woman": "🙆", "no_good": "🙅", "bow": "🙇",
+        // Hearts & symbols
+        "two_hearts": "💕", "sparkling_heart": "💖", "heartpulse": "💗", "heartbeat": "💓",
+        "revolving_hearts": "💞", "cupid": "💘", "gift_heart": "💝", "broken_heart": "💔",
+        "heavy_heart_exclamation": "❣️", "brown_heart": "🤎",
+        "heavy_plus_sign": "➕", "heavy_minus_sign": "➖", "heavy_division_sign": "➗",
+        "heavy_dollar_sign": "💲", "exclamation_question_mark": "⁉️", "grey_question": "❔",
+        "grey_exclamation": "❕", "bangbang": "‼️", "checkered_flag": "🏁", "triangular_flag_on_post": "🚩",
+        "ballot_box": "🗳️", "recycle": "♻️", "sos": "🆘",
+        // Common objects
+        "gift": "🎁", "trophy": "🏆", "medal": "🏅", "first_place_medal": "🥇",
+        "hammer": "🔨", "wrench": "🔧", "gear": "⚙️", "hammer_and_wrench": "🛠️", "nut_and_bolt": "🔩",
+        "package": "📦", "inbox_tray": "📥", "outbox_tray": "📤", "calendar": "📅", "date": "📆",
+        "chart_with_upwards_trend": "📈", "chart_with_downwards_trend": "📉", "bar_chart": "📊",
+        "clipboard": "📋", "page_facing_up": "📄", "books": "📚", "book": "📖", "link": "🔗",
+        "phone": "☎️", "telephone_receiver": "📞", "email": "✉️", "envelope": "✉️", "calling": "📲",
+        "computer": "💻", "desktop_computer": "🖥️", "keyboard": "⌨️", "floppy_disk": "💾",
+        "battery": "🔋", "electric_plug": "🔌", "flashlight": "🔦", "magnet": "🧲", "wastebasket": "🗑️",
+        "rotating_light": "🚨", "construction": "🚧", "no_entry": "⛔", "no_entry_sign": "🚫",
+        "white_flower": "💮", "rose": "🌹", "tulip": "🌷", "four_leaf_clover": "🍀",
+        "sunny": "☀️", "cloud": "☁️", "rainbow": "🌈", "snowflake": "❄️", "umbrella": "☔",
+        "moon": "🌙", "earth_americas": "🌎", "globe_with_meridians": "🌐",
     ]
 }
 
