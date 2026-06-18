@@ -258,6 +258,11 @@ struct ThreadSheet: View {
     let onClose: () -> Void
     @StateObject private var loader: ThreadLoader
     @EnvironmentObject var settings: AppSettings
+    @State private var contentHeight: CGFloat = 0
+
+    /// Keep the sheet comfortably inside the window rather than filling it.
+    static let maxWidth: CGFloat = 460
+    static let maxBodyHeight: CGFloat = 440
 
     init(request: ThreadSheetRequest, onClose: @escaping () -> Void) {
         self.request = request
@@ -277,7 +282,7 @@ struct ThreadSheet: View {
                 Divider().opacity(0.5)
                 bodyContent
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: Self.maxWidth)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color.themeCard)
@@ -314,26 +319,30 @@ struct ThreadSheet: View {
     @ViewBuilder
     private var bodyContent: some View {
         if loader.loading && loader.messages.isEmpty {
-            VStack { Spacer(); SiftSpinner(); Spacer() }
-                .frame(maxWidth: .infinity)
+            SiftSpinner().frame(maxWidth: .infinity).frame(height: 120)
         } else if let error = loader.error {
             VStack(spacing: 8) {
-                Spacer()
                 LucideIcon(sf: "exclamationmark.circle", size: 22).foregroundStyle(.secondary)
                 Text(error).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                Spacer()
             }
             .frame(maxWidth: .infinity)
-            .padding(24)
+            .frame(height: 130)
+            .padding(.horizontal, 24)
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
                     ForEach(loader.messages) { msg in
                         ThreadMessageRow(message: msg, redacted: settings.redactionEnabled)
                     }
                 }
                 .padding(.vertical, 8)
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: ThreadHeightKey.self, value: proxy.size.height)
+                })
             }
+            // Hug the content, but never grow past the cap (then it scrolls).
+            .frame(height: min(max(contentHeight, 1), Self.maxBodyHeight))
+            .onPreferenceChange(ThreadHeightKey.self) { contentHeight = $0 }
         }
     }
 }
@@ -402,7 +411,7 @@ private struct ThreadReactions: View {
         HStack(spacing: 4) {
             ForEach(reactions, id: \.name) { r in
                 HStack(spacing: 3) {
-                    Text(":\(r.name):").font(.system(size: 10))
+                    Text(Emoji.render(r.name)).font(.system(size: 11))
                     Text("\(r.count ?? r.users?.count ?? 1)")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -414,6 +423,51 @@ private struct ThreadReactions: View {
         }
         .padding(.top, 2)
     }
+}
+
+/// Height of the scrollable message list, so the sheet can hug short threads.
+private struct ThreadHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// Maps common Slack reaction shortcodes to their Unicode emoji. Strips skin-
+/// tone modifiers (`::skin-tone-3`); unknown or custom emoji fall back to the
+/// `:name:` shortcode so nothing silently vanishes.
+enum Emoji {
+    static func render(_ name: String) -> String {
+        let base = name.components(separatedBy: "::").first ?? name
+        return map[base] ?? ":\(base):"
+    }
+
+    private static let map: [String: String] = [
+        "+1": "👍", "thumbsup": "👍", "-1": "👎", "thumbsdown": "👎",
+        "white_check_mark": "✅", "heavy_check_mark": "✔️", "ballot_box_with_check": "☑️",
+        "x": "❌", "heavy_multiplication_x": "✖️", "negative_squared_cross_mark": "❎",
+        "tada": "🎉", "confetti_ball": "🎊", "pray": "🙏", "raised_hands": "🙌", "clap": "👏",
+        "fire": "🔥", "100": "💯", "rocket": "🚀", "sparkles": "✨", "star": "⭐", "star2": "🌟",
+        "eyes": "👀", "thinking_face": "🤔", "muscle": "💪", "ok_hand": "👌", "handshake": "🤝",
+        "wave": "👋", "raised_hand": "✋", "point_up": "☝️", "point_up_2": "👆", "point_down": "👇",
+        "point_right": "👉", "point_left": "👈", "crossed_fingers": "🤞", "saluting_face": "🫡",
+        "heart": "❤️", "orange_heart": "🧡", "yellow_heart": "💛", "green_heart": "💚",
+        "blue_heart": "💙", "purple_heart": "💜", "black_heart": "🖤", "white_heart": "🤍",
+        "heart_hands": "🫶", "smile": "😄", "smiley": "😃", "grin": "😁", "joy": "😂", "rofl": "🤣",
+        "sweat_smile": "😅", "blush": "😊", "wink": "😉", "upside_down_face": "🙃", "slightly_smiling_face": "🙂",
+        "heart_eyes": "😍", "star_struck": "🤩", "sunglasses": "😎", "partying_face": "🥳",
+        "hugging_face": "🤗", "thinking": "🤔", "shrug": "🤷", "facepalm": "🤦", "grimacing": "😬",
+        "pleading_face": "🥺", "cry": "😢", "sob": "😭", "rage": "😡", "scream": "😱",
+        "exploding_head": "🤯", "skull": "💀", "melting_face": "🫠", "salute": "🫡",
+        "warning": "⚠️", "exclamation": "❗", "heavy_exclamation_mark": "❗", "question": "❓",
+        "bulb": "💡", "bug": "🐛", "zap": "⚡", "dart": "🎯", "pushpin": "📌", "memo": "📝",
+        "pencil": "✏️", "mag": "🔍", "lock": "🔒", "key": "🔑", "bell": "🔔", "mega": "📣",
+        "speech_balloon": "💬", "robot_face": "🤖", "ok": "🆗", "new": "🆕",
+        "red_circle": "🔴", "large_blue_circle": "🔵", "green_circle": "🟢", "large_green_circle": "🟢",
+        "yellow_circle": "🟡", "large_yellow_circle": "🟡", "white_circle": "⚪", "black_circle": "⚫",
+        "coffee": "☕", "beers": "🍻", "pizza": "🍕", "birthday": "🎂", "money_with_wings": "💸",
+        "boom": "💥", "snail": "🐌", "turtle": "🐢", "hourglass": "⌛", "alarm_clock": "⏰",
+    ]
 }
 
 /// Square, slightly-rounded avatar (Slack style) with an initial placeholder
