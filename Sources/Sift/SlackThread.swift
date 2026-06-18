@@ -18,9 +18,19 @@ struct ThreadMessage: Identifiable {
     let avatarURL: URL?
     let blocks: [SlackBlock]
     let rawText: String     // unrendered original, used for the redacted view
-    let reactions: [SlackClient.Message.Reaction]
+    let reactions: [ThreadReaction]
     /// True when this message starts a new author block (show avatar + name).
     let startsGroup: Bool
+}
+
+/// A reaction resolved for display: Unicode for standard emoji, an image URL for
+/// custom ones, or neither (render the `:name:` shortcode).
+struct ThreadReaction: Identifiable, Hashable {
+    let name: String
+    let count: Int
+    let unicode: String?
+    let imageURL: URL?
+    var id: String { name }
 }
 
 // MARK: - Loader
@@ -38,6 +48,10 @@ final class ThreadLoader: ObservableObject {
     private let channelID: String
     private let parentTs: String
 
+    /// Workspace custom emoji (name → image URL). Workspace-wide and stable, so
+    /// fetch once per app run and reuse across threads.
+    private static var emojiCatalog: [String: URL]?
+
     init(channelID: String, parentTs: String) {
         self.channelID = channelID
         self.parentTs = parentTs
@@ -54,6 +68,16 @@ final class ThreadLoader: ObservableObject {
         let client = SlackClient(token: token)
         do {
             let raw = try await fetchThread(client)
+
+            // Custom emoji catalog (cached after the first fetch). Empty if the
+            // token lacks emoji:read — reactions then fall back to shortcodes.
+            let emoji: [String: URL]
+            if let cached = Self.emojiCatalog {
+                emoji = cached
+            } else {
+                emoji = (try? await client.customEmoji()) ?? [:]
+                Self.emojiCatalog = emoji
+            }
 
             // Resolve every user we'll need: message authors plus anyone @-mentioned
             // in the bodies. Lookups are independent, so fan them out.
@@ -88,7 +112,15 @@ final class ThreadLoader: ObservableObject {
                     avatarURL: card?.avatarURL,
                     blocks: SlackText.blocks(m.text ?? "", names: names),
                     rawText: m.text ?? "",
-                    reactions: m.reactions ?? [],
+                    reactions: (m.reactions ?? []).map { r in
+                        let base = r.name.components(separatedBy: "::").first ?? r.name
+                        return ThreadReaction(
+                            name: base,
+                            count: r.count ?? r.users?.count ?? 1,
+                            unicode: Emoji.unicode(base),
+                            imageURL: emoji[base]
+                        )
+                    },
                     startsGroup: starts
                 ))
                 prevAuthor = m.user
@@ -604,13 +636,13 @@ private struct SlackBlocksView: View {
 }
 
 private struct ThreadReactions: View {
-    let reactions: [SlackClient.Message.Reaction]
+    let reactions: [ThreadReaction]
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(reactions, id: \.name) { r in
+            ForEach(reactions) { r in
                 HStack(spacing: 3) {
-                    Text(Emoji.render(r.name)).font(.system(size: 11))
-                    Text("\(r.count ?? r.users?.count ?? 1)")
+                    glyph(r)
+                    Text("\(r.count)")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -620,6 +652,22 @@ private struct ThreadReactions: View {
             }
         }
         .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private func glyph(_ r: ThreadReaction) -> some View {
+        if let unicode = r.unicode {
+            Text(unicode).font(.system(size: 11))
+        } else if let url = r.imageURL {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFit()
+            } placeholder: {
+                Color.clear
+            }
+            .frame(width: 14, height: 14)
+        } else {
+            Text(":\(r.name):").font(.system(size: 10))
+        }
     }
 }
 

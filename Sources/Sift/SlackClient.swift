@@ -244,6 +244,29 @@ actor SlackClient {
         return UserCard(id: userID, displayName: name, avatarURL: img)
     }
 
+    /// The workspace's custom emoji as name → image URL. Aliases (`alias:foo`)
+    /// resolve to their target's image; entries that alias a built-in emoji are
+    /// dropped (the Unicode table covers those). Needs the `emoji:read` scope.
+    func customEmoji() async throws -> [String: URL] {
+        struct Resp: Decodable {
+            let ok: Bool
+            let error: String?
+            let emoji: [String: String]?
+        }
+        let resp: Resp = try await get("emoji.list", [])
+        if !resp.ok { throw SlackError.apiError(resp.error ?? "unknown") }
+        let raw = resp.emoji ?? [:]
+        var resolved: [String: URL] = [:]
+        for (name, value) in raw where !value.hasPrefix("alias:") {
+            if let url = URL(string: value) { resolved[name] = url }
+        }
+        for (name, value) in raw where value.hasPrefix("alias:") {
+            let target = String(value.dropFirst("alias:".count))
+            if let url = resolved[target] { resolved[name] = url }
+        }
+        return resolved
+    }
+
     struct UserIdentity {
         let email: String?
         let teamID: String?
