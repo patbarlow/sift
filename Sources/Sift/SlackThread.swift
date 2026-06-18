@@ -57,7 +57,7 @@ final class ThreadLoader: ObservableObject {
         }
         let client = SlackClient(token: token)
         do {
-            let raw = try await client.conversationReplies(channelID: channelID, threadTs: parentTs)
+            let raw = try await fetchThread(client)
 
             // Resolve every user we'll need: message authors plus anyone @-mentioned
             // in the bodies. Lookups are independent, so fan them out.
@@ -102,6 +102,24 @@ final class ThreadLoader: ObservableObject {
             self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         loading = false
+    }
+
+    /// Fetch the thread's messages, oldest-first. Mirrors the sync worker:
+    /// DMs are flat (replies are new top-level messages, so read history from
+    /// the ask onward), and a channel ts can be a reply rather than the root —
+    /// `conversations.replies` on a reply ts returns only that one message, so
+    /// re-fetch from the real parent when the first message points at one.
+    private func fetchThread(_ client: SlackClient) async throws -> [SlackClient.Message] {
+        if channelID.hasPrefix("D") {
+            let oldest = String(format: "%.6f", (Double(parentTs) ?? 0) - 1)
+            let history = try await client.conversationHistory(channelID: channelID, after: oldest)
+            return history.sorted { (Double($0.ts) ?? 0) < (Double($1.ts) ?? 0) }
+        }
+        var replies = try await client.conversationReplies(channelID: channelID, threadTs: parentTs)
+        if let root = replies.first?.thread_ts, root != parentTs {
+            replies = try await client.conversationReplies(channelID: channelID, threadTs: root)
+        }
+        return replies
     }
 
     /// Pull `Uxxxx` / `Wxxxx` user IDs out of `<@U…>` mention tokens.
