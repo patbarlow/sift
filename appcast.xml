@@ -6,6 +6,14 @@
     <language>en</language>
     <!-- RELEASES: release.sh inserts the newest <item> directly below this line. -->
     <item>
+      <title>Sift 0.2.0</title>
+      <pubDate>Thu, 18 Jun 2026 05:29:05 +0000</pubDate>
+      <sparkle:version>27</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/patbarlow/sift/releases/download/v0.2.0/Sift-0.2.0.zip" type="application/octet-stream" sparkle:edSignature="mg3w7aMGP6MU+FWncm4bJ9ZCZxhOJSaSpFixlpYSVAYwJgcdfPO4KAjCAkd2s6xTF9SV3VrTMCVtZxw/mmC+Cw==" length="5889163" />
+    </item>
+    <item>
       <title>Sift 0.1.3</title>
       <pubDate>Thu, 18 Jun 2026 00:11:13 +0000</pubDate>
       <sparkle:version>10</sparkle:version>
