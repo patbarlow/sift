@@ -1651,6 +1651,7 @@ final class SyncWorker {
                 parent_user_id: msg.parent_user_id,
                 subtype: msg.subtype,
                 bot_id: msg.bot_id,
+                username: msg.username,
                 reactions: msg.reactions
             )
         }

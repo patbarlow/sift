@@ -35,6 +35,7 @@ actor SlackClient {
         let parent_user_id: String?
         let subtype: String?
         let bot_id: String?
+        let username: String?
         let reactions: [Reaction]?
 
         struct Reaction: Decodable, Hashable {
@@ -203,6 +204,44 @@ actor SlackClient {
             ?? resp.user?.real_name
             ?? resp.user?.name
             ?? userID
+    }
+
+    struct UserCard: Hashable {
+        let id: String
+        let displayName: String
+        let avatarURL: URL?
+    }
+
+    /// Display name + avatar for rendering a message author in the thread view.
+    func userCard(userID: String) async throws -> UserCard {
+        let params: [URLQueryItem] = [URLQueryItem(name: "user", value: userID)]
+        struct Resp: Decodable {
+            let ok: Bool
+            let error: String?
+            let user: User?
+            struct User: Decodable {
+                let real_name: String?
+                let name: String?
+                let profile: Profile?
+                struct Profile: Decodable {
+                    let display_name: String?
+                    let real_name: String?
+                    let image_72: String?
+                    let image_48: String?
+                }
+            }
+        }
+        let resp: Resp = try await get("users.info", params)
+        if !resp.ok { throw SlackError.apiError(resp.error ?? "unknown") }
+        func pick(_ s: String?) -> String? { (s?.isEmpty == false) ? s : nil }
+        let name = pick(resp.user?.profile?.display_name)
+            ?? pick(resp.user?.profile?.real_name)
+            ?? pick(resp.user?.real_name)
+            ?? pick(resp.user?.name)
+            ?? userID
+        let img = (resp.user?.profile?.image_72 ?? resp.user?.profile?.image_48)
+            .flatMap { URL(string: $0) }
+        return UserCard(id: userID, displayName: name, avatarURL: img)
     }
 
     struct UserIdentity {

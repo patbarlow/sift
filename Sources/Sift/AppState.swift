@@ -19,6 +19,8 @@ final class AppState: ObservableObject {
     @Published var mainTab: MainTab = .todos
     // The confirm/input modal shown over the main window (nil = hidden).
     @Published var modal: SiftModalConfig?
+    // The Slack thread reader sheet (nil = hidden).
+    @Published var threadSheet: ThreadSheetRequest?
 
     private var syncTimer: Timer?
     private var wakeObserver: Any?
@@ -293,6 +295,17 @@ final class AppState: ObservableObject {
         let secs = digits.prefix(digits.count - 6)
         let micros = digits.suffix(6)
         return "\(channel):\(secs).\(micros)"
+    }
+
+    /// Open the in-app Slack thread reader for a "channelID:parentTs" key. Falls
+    /// back to opening the permalink externally if the key can't be parsed.
+    func openThread(forKey key: String, title: String, url: URL?) {
+        let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+            if let url { NSWorkspace.shared.open(url) }
+            return
+        }
+        threadSheet = ThreadSheetRequest(channelID: parts[0], parentTs: parts[1], title: title, slackURL: url)
     }
 
     private func applySnooze(_ todo: Todo, activity: ActivityKind? = nil, _ mutate: @escaping (Todo) -> Void) {
