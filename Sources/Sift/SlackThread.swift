@@ -249,8 +249,8 @@ struct TodoDetailSheet: View {
     @State private var contentHeight: CGFloat = 0
 
     /// Keep the sheet inside the window, and let it hug short content.
-    static let maxWidth: CGFloat = 480
-    static let maxBodyHeight: CGFloat = 540
+    static let maxWidth: CGFloat = 520
+    static let maxBodyHeight: CGFloat = 620
 
     init(todo: Todo, onClose: @escaping () -> Void) {
         self.todo = todo
@@ -271,29 +271,25 @@ struct TodoDetailSheet: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onClose() }
 
-            VStack(spacing: 0) {
-                // No header chrome — just a close affordance in the corner.
-                HStack {
-                    Spacer()
+            content
+                .frame(maxWidth: Self.maxWidth)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.themeCard)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                        .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+                )
+                // Close floats in the corner — no header strip, so the title can
+                // sit at the very top.
+                .overlay(alignment: .topTrailing) {
                     SiftButton(leading: "xmark", variant: .subtle, action: onClose)
                         .keyboardShortcut(.cancelAction)
+                        .padding(8)
                 }
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-
-                content
-            }
-            .frame(maxWidth: Self.maxWidth)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.themeCard)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
-            )
-            .padding(16)
+                .padding(16)
         }
         .task { if isSlack { await loader.load() } }
     }
@@ -305,6 +301,7 @@ struct TodoDetailSheet: View {
                     .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.trailing, 30)   // clear the floating close button
                 if !todo.summary.isEmpty {
                     Text(todo.displaySummary.redacting(settings.redactionEnabled))
                         .font(.system(size: 13))
@@ -315,6 +312,7 @@ struct TodoDetailSheet: View {
                 if isSlack { threadContainer } else { granolaNote }
             }
             .padding(.horizontal, 16)
+            .padding(.top, 16)
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(GeometryReader { proxy in
