@@ -420,10 +420,16 @@ final class AppState: ObservableObject {
         let id = todo.persistentModelID
         Task { @MainActor in
             let ctx = ModelContext(container)
-            if let t = ctx.model(for: id) as? Todo {
-                ctx.delete(t)
-                try? ctx.save()
+            guard let t = ctx.model(for: id) as? Todo else { return }
+            // Delete means "this isn't a todo" — ignore its thread(s) so the next
+            // sync doesn't just recreate it. A merged todo covers several threads.
+            let keys = Set(([t.threadKey] + t.extraSources.map(\.threadKey)).filter { !$0.isEmpty })
+            for key in keys where ((try? ctx.fetch(FetchDescriptor<IgnoredThread>(
+                predicate: #Predicate { $0.threadKey == key }))) ?? []).isEmpty {
+                ctx.insert(IgnoredThread(threadKey: key))
             }
+            ctx.delete(t)
+            try? ctx.save()
         }
     }
 
