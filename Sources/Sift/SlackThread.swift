@@ -249,7 +249,7 @@ struct TodoDetailSheet: View {
     @State private var contentHeight: CGFloat = 0
 
     /// Keep the sheet inside the window, and let it hug short content.
-    static let maxWidth: CGFloat = 520
+    static let maxWidth: CGFloat = 544
     static let maxBodyHeight: CGFloat = 620
 
     init(todo: Todo, onClose: @escaping () -> Void) {
@@ -265,33 +265,45 @@ struct TodoDetailSheet: View {
     private var isSlack: Bool { todo.sourceKind != .granola }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             Color.black.opacity(0.35)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture { onClose() }
 
-            content
-                .frame(maxWidth: Self.maxWidth)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.themeCard)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                        )
-                        .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
-                )
-                // Close floats in the corner — no header strip, so the title can
-                // sit at the very top.
-                .overlay(alignment: .topTrailing) {
-                    SiftButton(leading: "xmark", variant: .subtle, action: onClose)
-                        .keyboardShortcut(.cancelAction)
-                        .padding(8)
-                }
-                .padding(16)
+            // Pin the card's top to where it sits at max height, so a shorter
+            // todo only moves its bottom edge — switching todos loads and
+            // expands downward instead of growing from the middle.
+            GeometryReader { geo in
+                content
+                    .frame(maxWidth: Self.maxWidth)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.themeCard)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+                            .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+                    )
+                    // Close floats in the corner — no header strip, so the title
+                    // can sit at the very top.
+                    .overlay(alignment: .topTrailing) {
+                        SiftButton(leading: "xmark", variant: .subtle, action: onClose)
+                            .keyboardShortcut(.cancelAction)
+                            .padding(8)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, topInset(geo.size.height))
+            }
         }
         .task { if isSlack { await loader.load() } }
+    }
+
+    /// Top margin that keeps the card vertically centred *as if* it were at max
+    /// height, so its top edge stays fixed no matter how tall the content is.
+    private func topInset(_ available: CGFloat) -> CGFloat {
+        max(16, (available - Self.maxBodyHeight) / 2)
     }
 
     private var content: some View {
