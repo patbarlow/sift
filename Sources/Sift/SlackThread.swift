@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Quartz   // QLPreviewPanel
 
 // MARK: - Rendered message
 
@@ -787,7 +788,7 @@ private struct ThreadFilesView: View {
                     )
                     .contentShape(Rectangle())
                     .onTapGesture { openInPreview(file) }
-                    .help("Open in Preview")
+                    .help("Quick Look")
                 } else {
                     FileChip(file: file) {
                         if let url = file.permalink { NSWorkspace.shared.open(url) }
@@ -797,8 +798,8 @@ private struct ThreadFilesView: View {
         }
     }
 
-    /// Download the full-res image (token-authed) to a temp file and hand it to
-    /// the system previewer (Preview / Quick Look).
+    /// Download the full-res image (token-authed) to a temp file and show it in
+    /// a Quick Look panel (spacebar-style peek; Esc closes it).
     private func openInPreview(_ file: ThreadFile) {
         guard let url = file.fullURL ?? file.thumbURL else {
             if let permalink = file.permalink { NSWorkspace.shared.open(permalink) }
@@ -814,8 +815,35 @@ private struct ThreadFilesView: View {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let destination = dir.appendingPathComponent(file.name)
             guard (try? data.write(to: destination)) != nil else { return }
-            await MainActor.run { NSWorkspace.shared.open(destination) }
+            await MainActor.run { QuickLook.shared.show(destination) }
         }
+    }
+}
+
+/// Drives the system Quick Look panel for a single file. AppKit holds the data
+/// source weakly, so keep the shared instance alive for the panel's lifetime.
+final class QuickLook: NSObject, QLPreviewPanelDataSource {
+    static let shared = QuickLook()
+    private var urls: [URL] = []
+
+    func show(_ url: URL) {
+        urls = [url]
+        guard let panel = QLPreviewPanel.shared() else { return }
+        panel.dataSource = self
+        if panel.isVisible {
+            panel.reloadData()
+        } else {
+            // Ensure the panel can become key (so Esc/space close it) in this
+            // accessory (LSUIElement) app.
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel) -> Int { urls.count }
+
+    func previewPanel(_ panel: QLPreviewPanel, previewItemAt index: Int) -> QLPreviewItem {
+        urls[index] as NSURL
     }
 }
 
