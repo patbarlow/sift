@@ -281,8 +281,17 @@ struct TodoDetailSheet: View {
                 card
                     .frame(maxWidth: Self.maxWidth)
                     .frame(maxWidth: .infinity, alignment: .center)
+                    // Keep a margin off the window edges as it shrinks on resize.
+                    .padding(.horizontal, 16)
                     .padding(.top, topInset(geo.size.height))
             }
+
+            // No visible close button, so keep Esc working via a hidden one.
+            Button("", action: onClose)
+                .keyboardShortcut(.cancelAction)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
         }
         .task { if isSlack { await loader.load() } }
     }
@@ -310,21 +319,17 @@ struct TodoDetailSheet: View {
         )
     }
 
-    /// Fixed header: the title (up to two lines, then truncated) plus close.
+    /// Fixed header: just the title (up to two lines, then truncated), centred
+    /// vertically. Closing is via click-outside or Esc — no close button.
     private var header: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(todo.title.redacting(settings.redactionEnabled))
-                .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
-                .foregroundStyle(Color.primary)
-                .lineLimit(2)
-                .truncationMode(.tail)
-            Spacer(minLength: 8)
-            SiftButton(leading: "xmark", variant: .subtle, action: onClose)
-                .keyboardShortcut(.cancelAction)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        Text(todo.title.redacting(settings.redactionEnabled))
+            .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
+            .foregroundStyle(Color.primary)
+            .lineLimit(2)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
     }
 
     /// Everything below the fixed title scrolls.
