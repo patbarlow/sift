@@ -3,12 +3,21 @@ import AppKit
 
 // MARK: - Rendered message
 
+/// A block of a rendered message — Slack messages mix normal paragraphs, block
+/// quotes (`>`), and fenced code (```` ``` ````).
+enum SlackBlock: Hashable {
+    case paragraph(AttributedString)
+    case quote(AttributedString)
+    case code(String)
+}
+
 struct ThreadMessage: Identifiable {
     let id: String          // Slack ts
     let date: Date?
     let authorName: String
     let avatarURL: URL?
-    let text: AttributedString
+    let blocks: [SlackBlock]
+    let rawText: String     // unrendered original, used for the redacted view
     let reactions: [SlackClient.Message.Reaction]
     /// True when this message starts a new author block (show avatar + name).
     let startsGroup: Bool
@@ -77,7 +86,8 @@ final class ThreadLoader: ObservableObject {
                     date: date,
                     authorName: author,
                     avatarURL: card?.avatarURL,
-                    text: SlackText.attributed(m.text ?? "", names: names),
+                    blocks: SlackText.blocks(m.text ?? "", names: names),
+                    rawText: m.text ?? "",
                     reactions: m.reactions ?? [],
                     startsGroup: starts
                 ))
@@ -126,6 +136,62 @@ final class ThreadLoader: ObservableObject {
 /// friends, `<url|label>` links, the `*bold* _italic_ ~strike~ \`code\`` wrappers,
 /// and `&amp;`/`&lt;`/`&gt;` entities. Emoji shortcodes are left as `:text:`.
 enum SlackText {
+    /// Split a message into block-level pieces: fenced code, block quotes, and
+    /// normal paragraphs (inline-formatted). Code is left raw; everything else
+    /// runs through the inline renderer.
+    static func blocks(_ raw: String, names: [String: String]) -> [SlackBlock] {
+        var blocks: [SlackBlock] = []
+        // ``` fences toggle code on/off, so odd-indexed segments are code.
+        for (i, segment) in raw.components(separatedBy: "```").enumerated() {
+            if i % 2 == 1 {
+                let code = segment.trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
+                if !code.isEmpty { blocks.append(.code(unescape(code))) }
+            } else {
+                appendTextBlocks(segment, names: names, into: &blocks)
+            }
+        }
+        return blocks
+    }
+
+    /// Group consecutive `>`-quoted lines into quote blocks; the rest become
+    /// paragraph blocks (newlines preserved within each).
+    private static func appendTextBlocks(_ text: String, names: [String: String], into blocks: inout [SlackBlock]) {
+        var para: [String] = []
+        var quote: [String] = []
+        func flushPara() {
+            let joined = para.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty { blocks.append(.paragraph(attributed(joined, names: names))) }
+            para.removeAll()
+        }
+        func flushQuote() {
+            let joined = quote.joined(separator: "\n")
+            if !joined.isEmpty { blocks.append(.quote(attributed(joined, names: names))) }
+            quote.removeAll()
+        }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if let quoted = quoteContent(line) {
+                flushPara()
+                quote.append(quoted)
+            } else {
+                flushQuote()
+                para.append(line)
+            }
+        }
+        flushPara()
+        flushQuote()
+    }
+
+    /// The content of a `>`/`&gt;` quote line, or nil if the line isn't a quote.
+    private static func quoteContent(_ line: String) -> String? {
+        let trimmed = line.drop { $0 == " " }
+        for marker in ["&gt;", ">"] where trimmed.hasPrefix(marker) {
+            var rest = trimmed.dropFirst(marker.count)
+            if rest.first == " " { rest = rest.dropFirst() }
+            return String(rest)
+        }
+        return nil
+    }
+
     static func attributed(_ raw: String, names: [String: String]) -> AttributedString {
         var out = AttributedString()
         var idx = raw.startIndex
@@ -186,7 +252,7 @@ enum SlackText {
         var plain = ""
         var i = 0
         func flush() {
-            if !plain.isEmpty { out.append(AttributedString(unescape(plain))); plain = "" }
+            if !plain.isEmpty { out.append(AttributedString(emojify(unescape(plain)))); plain = "" }
         }
         while i < chars.count {
             let c = chars[i]
@@ -194,7 +260,9 @@ enum SlackText {
                (i == 0 || !chars[i - 1].isLetter && !chars[i - 1].isNumber),
                let close = closer(chars, open: i, marker: c) {
                 flush()
-                var seg = AttributedString(unescape(String(chars[(i + 1)..<close])))
+                let inner = unescape(String(chars[(i + 1)..<close]))
+                // Don't emojify inside inline code — it's meant to be literal.
+                var seg = AttributedString(intent == .code ? inner : emojify(inner))
                 seg.inlinePresentationIntent = intent
                 out.append(seg)
                 i = close + 1
@@ -227,6 +295,21 @@ enum SlackText {
             j += 1
         }
         return nil
+    }
+
+    /// Replace `:shortcode:` with its Unicode emoji where known; custom or
+    /// unrecognised codes are left as-is (they need the `emoji:read` scope).
+    private static func emojify(_ s: String) -> String {
+        guard s.contains(":"),
+              let regex = try? NSRegularExpression(pattern: ":([a-zA-Z0-9_'+-]+):") else { return s }
+        var result = s
+        for match in regex.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed() {
+            guard let full = Range(match.range, in: result),
+                  let nameR = Range(match.range(at: 1), in: result),
+                  let unicode = Emoji.unicode(String(result[nameR])) else { continue }
+            result.replaceSubrange(full, with: unicode)
+        }
+        return result
     }
 
     private static func unescape(_ s: String) -> String {
@@ -449,12 +532,14 @@ private struct ThreadMessageRow: View {
                         }
                     }
                 }
-                Text(displayText)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.primary.opacity(0.9))
-                    .tint(.themeAccent)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                if redacted {
+                    Text(message.rawText.redactingPII())
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.primary.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    SlackBlocksView(blocks: message.blocks)
+                }
                 if !message.reactions.isEmpty {
                     ThreadReactions(reactions: message.reactions)
                 }
@@ -465,17 +550,56 @@ private struct ThreadMessageRow: View {
         .padding(.bottom, 2)
     }
 
-    /// When redaction is on, replace the rendered text with a plain redacted
-    /// string so screenshots stay clean.
-    private var displayText: AttributedString {
-        guard redacted else { return message.text }
-        return AttributedString(String(message.text.characters).redactingPII())
-    }
-
     static func time(_ d: Date) -> String {
         let f = DateFormatter()
         f.dateFormat = Calendar.current.isDateInToday(d) ? "h:mm a" : "MMM d, h:mm a"
         return f.string(from: d)
+    }
+}
+
+/// Renders a message's blocks: paragraphs, quote bars, and code boxes.
+private struct SlackBlocksView: View {
+    let blocks: [SlackBlock]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .paragraph(let text):
+                    Text(text)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.primary.opacity(0.9))
+                        .tint(.themeAccent)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .quote(let text):
+                    HStack(alignment: .top, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color.secondary.opacity(0.4))
+                            .frame(width: 3)
+                        Text(text)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .tint(.themeAccent)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                case .code(let code):
+                    Text(code)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Color.primary.opacity(0.85))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.06))
+                        )
+                }
+            }
+        }
     }
 }
 
@@ -511,6 +635,11 @@ private struct ThreadHeightKey: PreferenceKey {
 /// tone modifiers (`::skin-tone-3`); unknown or custom emoji fall back to the
 /// `:name:` shortcode so nothing silently vanishes.
 enum Emoji {
+    /// Unicode for a shortcode (skin-tone modifier stripped), or nil if unknown.
+    static func unicode(_ name: String) -> String? {
+        map[name.components(separatedBy: "::").first ?? name]
+    }
+
     static func render(_ name: String) -> String {
         let base = name.components(separatedBy: "::").first ?? name
         return map[base] ?? ":\(base):"
