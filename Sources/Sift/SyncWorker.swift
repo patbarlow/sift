@@ -1652,7 +1652,8 @@ final class SyncWorker {
                 subtype: msg.subtype,
                 bot_id: msg.bot_id,
                 username: msg.username,
-                reactions: msg.reactions
+                reactions: msg.reactions,
+                files: msg.files
             )
         }
     }

@@ -3,11 +3,18 @@ import AppKit
 
 // MARK: - Rendered message
 
+/// An inline piece of a paragraph: a run of formatted text, or a custom emoji
+/// (rendered as an image). Standard emoji are folded into the text as Unicode.
+enum InlineToken: Hashable {
+    case text(AttributedString)
+    case emoji(name: String, url: URL)
+}
+
 /// A block of a rendered message — Slack messages mix normal paragraphs, block
 /// quotes (`>`), and fenced code (```` ``` ````).
 enum SlackBlock: Hashable {
-    case paragraph(AttributedString)
-    case quote(AttributedString)
+    case paragraph([InlineToken])
+    case quote([InlineToken])
     case code(String)
 }
 
@@ -19,8 +26,20 @@ struct ThreadMessage: Identifiable {
     let blocks: [SlackBlock]
     let rawText: String     // unrendered original, used for the redacted view
     let reactions: [ThreadReaction]
+    let files: [ThreadFile]
     /// True when this message starts a new author block (show avatar + name).
     let startsGroup: Bool
+}
+
+/// A file attached to a message, resolved for display.
+struct ThreadFile: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let isImage: Bool
+    let thumbURL: URL?      // authed image URL (images only)
+    let permalink: URL?     // opened externally
+    let aspectRatio: CGFloat?
+    let sizeText: String?
 }
 
 /// A reaction resolved for display: Unicode for standard emoji, an image URL for
@@ -110,7 +129,7 @@ final class ThreadLoader: ObservableObject {
                     date: date,
                     authorName: author,
                     avatarURL: card?.avatarURL,
-                    blocks: SlackText.blocks(m.text ?? "", names: names),
+                    blocks: SlackText.blocks(m.text ?? "", names: names, custom: emoji),
                     rawText: m.text ?? "",
                     reactions: (m.reactions ?? []).map { r in
                         let base = r.name.components(separatedBy: "::").first ?? r.name
@@ -121,6 +140,7 @@ final class ThreadLoader: ObservableObject {
                             imageURL: emoji[base]
                         )
                     },
+                    files: Self.resolveFiles(m.files),
                     startsGroup: starts
                 ))
                 prevAuthor = m.user
@@ -151,6 +171,35 @@ final class ThreadLoader: ObservableObject {
         return replies
     }
 
+    /// Resolve a message's attachments into display files. Tombstoned (deleted)
+    /// files are dropped; image files keep the largest thumbnail we have.
+    static func resolveFiles(_ files: [SlackClient.Message.File]?) -> [ThreadFile] {
+        (files ?? []).compactMap { f in
+            guard f.mode != "tombstone" else { return nil }
+            let thumb = (f.thumb_480 ?? f.thumb_720 ?? f.thumb_360 ?? f.url_private).flatMap(URL.init(string:))
+            let ratio: CGFloat? = {
+                guard let w = f.original_w, let h = f.original_h, h > 0 else { return nil }
+                return CGFloat(w) / CGFloat(h)
+            }()
+            return ThreadFile(
+                id: f.id ?? f.permalink ?? UUID().uuidString,
+                name: f.title ?? f.name ?? "Attachment",
+                isImage: f.isImage,
+                thumbURL: f.isImage ? thumb : nil,
+                permalink: (f.permalink ?? f.url_private).flatMap(URL.init(string:)),
+                aspectRatio: ratio,
+                sizeText: f.size.map(Self.byteString)
+            )
+        }
+    }
+
+    private static func byteString(_ bytes: Int) -> String {
+        let units = ["B", "KB", "MB", "GB"]
+        var value = Double(bytes), i = 0
+        while value >= 1024, i < units.count - 1 { value /= 1024; i += 1 }
+        return i == 0 ? "\(bytes) B" : String(format: "%.1f %@", value, units[i])
+    }
+
     /// Pull `Uxxxx` / `Wxxxx` user IDs out of `<@U…>` mention tokens.
     static func mentionedUserIDs(in text: String) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: "<@([UW][A-Z0-9]+)") else { return [] }
@@ -166,12 +215,13 @@ final class ThreadLoader: ObservableObject {
 /// A small Slack "mrkdwn" renderer. Handles the constructs that actually show
 /// up in threads: `<@U…>` user mentions, `<#C…|name>` channels, `<!here>` and
 /// friends, `<url|label>` links, the `*bold* _italic_ ~strike~ \`code\`` wrappers,
-/// and `&amp;`/`&lt;`/`&gt;` entities. Emoji shortcodes are left as `:text:`.
+/// and `&amp;`/`&lt;`/`&gt;` entities. Standard emoji shortcodes fold to Unicode;
+/// custom ones are split into image tokens by `tokens(_:names:custom:)`.
 enum SlackText {
     /// Split a message into block-level pieces: fenced code, block quotes, and
     /// normal paragraphs (inline-formatted). Code is left raw; everything else
     /// runs through the inline renderer.
-    static func blocks(_ raw: String, names: [String: String]) -> [SlackBlock] {
+    static func blocks(_ raw: String, names: [String: String], custom: [String: URL] = [:]) -> [SlackBlock] {
         var blocks: [SlackBlock] = []
         // ``` fences toggle code on/off, so odd-indexed segments are code.
         for (i, segment) in raw.components(separatedBy: "```").enumerated() {
@@ -179,7 +229,7 @@ enum SlackText {
                 let code = segment.trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
                 if !code.isEmpty { blocks.append(.code(unescape(code))) }
             } else {
-                appendTextBlocks(segment, names: names, into: &blocks)
+                appendTextBlocks(segment, names: names, custom: custom, into: &blocks)
             }
         }
         return blocks
@@ -187,17 +237,17 @@ enum SlackText {
 
     /// Group consecutive `>`-quoted lines into quote blocks; the rest become
     /// paragraph blocks (newlines preserved within each).
-    private static func appendTextBlocks(_ text: String, names: [String: String], into blocks: inout [SlackBlock]) {
+    private static func appendTextBlocks(_ text: String, names: [String: String], custom: [String: URL], into blocks: inout [SlackBlock]) {
         var para: [String] = []
         var quote: [String] = []
         func flushPara() {
             let joined = para.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !joined.isEmpty { blocks.append(.paragraph(attributed(joined, names: names))) }
+            if !joined.isEmpty { blocks.append(.paragraph(tokens(joined, names: names, custom: custom))) }
             para.removeAll()
         }
         func flushQuote() {
             let joined = quote.joined(separator: "\n")
-            if !joined.isEmpty { blocks.append(.quote(attributed(joined, names: names))) }
+            if !joined.isEmpty { blocks.append(.quote(tokens(joined, names: names, custom: custom))) }
             quote.removeAll()
         }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
@@ -211,6 +261,33 @@ enum SlackText {
         }
         flushPara()
         flushQuote()
+    }
+
+    /// Split text into inline tokens, pulling out `:custom-emoji:` shortcodes
+    /// (those in the catalog) as image tokens; the text between them is rendered
+    /// normally (standard emoji folded to Unicode inside `attributed`).
+    static func tokens(_ raw: String, names: [String: String], custom: [String: URL]) -> [InlineToken] {
+        guard !custom.isEmpty, raw.contains(":"),
+              let regex = try? NSRegularExpression(pattern: ":([a-zA-Z0-9_'+-]+):") else {
+            return [.text(attributed(raw, names: names))]
+        }
+        var result: [InlineToken] = []
+        var cursor = raw.startIndex
+        for match in regex.matches(in: raw, range: NSRange(raw.startIndex..., in: raw)) {
+            guard let full = Range(match.range, in: raw),
+                  let nameR = Range(match.range(at: 1), in: raw) else { continue }
+            let name = String(raw[nameR])
+            guard let url = custom[name] else { continue }   // only custom emoji split out
+            if cursor < full.lowerBound {
+                result.append(.text(attributed(String(raw[cursor..<full.lowerBound]), names: names)))
+            }
+            result.append(.emoji(name: name, url: url))
+            cursor = full.upperBound
+        }
+        if cursor < raw.endIndex {
+            result.append(.text(attributed(String(raw[cursor...]), names: names)))
+        }
+        return result.isEmpty ? [.text(attributed(raw, names: names))] : result
     }
 
     /// The content of a `>`/`&gt;` quote line, or nil if the line isn't a quote.
@@ -572,6 +649,10 @@ private struct ThreadMessageRow: View {
                 } else {
                     SlackBlocksView(blocks: message.blocks)
                 }
+                if !message.files.isEmpty {
+                    ThreadFilesView(files: message.files)
+                        .padding(.top, 4)
+                }
                 if !message.reactions.isEmpty {
                     ThreadReactions(reactions: message.reactions)
                 }
@@ -597,24 +678,14 @@ private struct SlackBlocksView: View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
-                case .paragraph(let text):
-                    Text(text)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.primary.opacity(0.9))
-                        .tint(.themeAccent)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .quote(let text):
+                case .paragraph(let tokens):
+                    InlineText(tokens: tokens, secondary: false)
+                case .quote(let tokens):
                     HStack(alignment: .top, spacing: 8) {
                         RoundedRectangle(cornerRadius: 1.5)
                             .fill(Color.secondary.opacity(0.4))
                             .frame(width: 3)
-                        Text(text)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .tint(.themeAccent)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
+                        InlineText(tokens: tokens, secondary: true)
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 case .code(let code):
@@ -633,6 +704,161 @@ private struct SlackBlocksView: View {
             }
         }
     }
+}
+
+/// Builds a paragraph as a `Text` concatenation, splicing custom emoji in as
+/// inline images once they've downloaded (it falls back to `:name:` meanwhile).
+private struct InlineText: View {
+    let tokens: [InlineToken]
+    let secondary: Bool
+    @StateObject private var emoji = InlineEmojiLoader()
+
+    var body: some View {
+        composed
+            .font(.system(size: 13))
+            .foregroundStyle(secondary ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.primary.opacity(0.9)))
+            .tint(.themeAccent)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .task { await emoji.load(tokens) }
+    }
+
+    private var composed: Text {
+        tokens.reduce(Text("")) { acc, token in
+            switch token {
+            case .text(let attributed):
+                return acc + Text(attributed)
+            case .emoji(let name, _):
+                if let image = emoji.image(name) {
+                    return acc + Text(Image(nsImage: image)).baselineOffset(-2)
+                }
+                return acc + Text(verbatim: ":\(name):")
+            }
+        }
+    }
+}
+
+/// Downloads custom-emoji images (public CDN, no auth) and sizes them to sit
+/// inline at ~text height. Shared cache so repeats across messages are free.
+@MainActor
+final class InlineEmojiLoader: ObservableObject {
+    @Published private var loaded: [String: NSImage] = [:]
+    private static let cache = NSCache<NSString, NSImage>()
+
+    func image(_ name: String) -> NSImage? {
+        loaded[name] ?? Self.cache.object(forKey: name as NSString)
+    }
+
+    func load(_ tokens: [InlineToken]) async {
+        for case let .emoji(name, url) in tokens where image(name) == nil {
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  let image = NSImage(data: data) else { continue }
+            let height: CGFloat = 15
+            let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
+            image.size = NSSize(width: height * aspect, height: height)
+            Self.cache.setObject(image, forKey: name as NSString)
+            loaded[name] = image
+        }
+    }
+}
+
+/// Image thumbnails and file chips attached to a message.
+private struct ThreadFilesView: View {
+    let files: [ThreadFile]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(files) { file in
+                if file.isImage, let thumb = file.thumbURL {
+                    AuthedImage(url: thumb) {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.secondary.opacity(0.12))
+                    }
+                    .aspectRatio(file.aspectRatio ?? 1.6, contentMode: .fit)
+                    .frame(maxWidth: 300, maxHeight: 240, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { open(file) }
+                    .help(file.name)
+                } else {
+                    FileChip(file: file) { open(file) }
+                }
+            }
+        }
+    }
+
+    private func open(_ file: ThreadFile) {
+        if let url = file.permalink { NSWorkspace.shared.open(url) }
+    }
+}
+
+private struct FileChip: View {
+    let file: ThreadFile
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                LucideIcon(sf: "note.text", size: 15).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(file.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    if let size = file.sizeText {
+                        Text(size).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(8)
+            .frame(maxWidth: 300, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(hovering ? 0.08 : 0.05))
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0; if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+    }
+}
+
+/// Loads a token-authenticated Slack image (thumbnails live behind url_private),
+/// which a plain AsyncImage can't fetch. Cached in memory across the session.
+private struct AuthedImage<Placeholder: View>: View {
+    let url: URL
+    @ViewBuilder var placeholder: () -> Placeholder
+    @State private var image: NSImage?
+    private static var cache: NSCache<NSURL, NSImage> { AuthedImageCache.shared }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable()
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        if let cached = Self.cache.object(forKey: url as NSURL) { image = cached; return }
+        guard let token = Keychain.read(SecretKey.slack) else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let loaded = NSImage(data: data) else { return }
+        Self.cache.setObject(loaded, forKey: url as NSURL)
+        image = loaded
+    }
+}
+
+private enum AuthedImageCache {
+    static let shared = NSCache<NSURL, NSImage>()
 }
 
 private struct ThreadReactions: View {
@@ -686,11 +912,6 @@ enum Emoji {
     /// Unicode for a shortcode (skin-tone modifier stripped), or nil if unknown.
     static func unicode(_ name: String) -> String? {
         map[name.components(separatedBy: "::").first ?? name]
-    }
-
-    static func render(_ name: String) -> String {
-        let base = name.components(separatedBy: "::").first ?? name
-        return map[base] ?? ":\(base):"
     }
 
     private static let map: [String: String] = [

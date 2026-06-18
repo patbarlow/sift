@@ -37,11 +37,30 @@ actor SlackClient {
         let bot_id: String?
         let username: String?
         let reactions: [Reaction]?
+        let files: [File]?
 
         struct Reaction: Decodable, Hashable {
             let name: String
             let users: [String]?
             let count: Int?
+        }
+
+        struct File: Decodable, Hashable {
+            let id: String?
+            let name: String?
+            let title: String?
+            let mimetype: String?
+            let url_private: String?
+            let thumb_360: String?
+            let thumb_480: String?
+            let thumb_720: String?
+            let permalink: String?
+            let original_w: Int?
+            let original_h: Int?
+            let size: Int?
+            let mode: String?    // "tombstone" = deleted
+
+            var isImage: Bool { mimetype?.hasPrefix("image/") == true }
         }
 
         var isFromBot: Bool { bot_id != nil || subtype == "bot_message" }
