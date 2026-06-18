@@ -772,50 +772,14 @@ private struct ThreadFilesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(files) { file in
-                if file.isImage, let thumb = file.thumbURL {
-                    // Size to the image's own aspect (scaledToFit), capped — no
-                    // forced box, so multiple images each render naturally.
-                    AuthedImage(url: thumb) {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.secondary.opacity(0.12))
-                            .frame(width: 220, height: 220 / (file.aspectRatio ?? 1.6))
-                    }
-                    .frame(maxWidth: 340, maxHeight: 380, alignment: .leading)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture { openInPreview(file) }
-                    .help("Quick Look")
+                if file.isImage {
+                    ThreadImageView(file: file)
                 } else {
                     FileChip(file: file) {
                         if let url = file.permalink { NSWorkspace.shared.open(url) }
                     }
                 }
             }
-        }
-    }
-
-    /// Download the full-res image (token-authed) to a temp file and show it in
-    /// a Quick Look panel (spacebar-style peek; Esc closes it).
-    private func openInPreview(_ file: ThreadFile) {
-        guard let url = file.fullURL ?? file.thumbURL else {
-            if let permalink = file.permalink { NSWorkspace.shared.open(permalink) }
-            return
-        }
-        Task {
-            guard let token = Keychain.read(SecretKey.slack) else { return }
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return }
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("SiftImages", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let destination = dir.appendingPathComponent(file.name)
-            guard (try? data.write(to: destination)) != nil else { return }
-            await MainActor.run { QuickLook.shared.show(destination) }
         }
     }
 }
@@ -876,35 +840,94 @@ private struct FileChip: View {
     }
 }
 
-/// Loads a token-authenticated Slack image (thumbnails live behind url_private),
-/// which a plain AsyncImage can't fetch. Cached in memory across the session.
-private struct AuthedImage<Placeholder: View>: View {
-    let url: URL
-    @ViewBuilder var placeholder: () -> Placeholder
+/// A token-authenticated Slack image thumbnail. Sizes to the image's own aspect
+/// (downscaled to fit a cap, never upscaled) so images in a message render at
+/// their true proportions independently. Tapping opens it in Quick Look, with a
+/// spinner + dim overlay while the full-res download is in flight.
+private struct ThreadImageView: View {
+    let file: ThreadFile
     @State private var image: NSImage?
-    private static var cache: NSCache<NSURL, NSImage> { AuthedImageCache.shared }
+    @State private var opening = false
+
+    private let maxW: CGFloat = 320
+    private let maxH: CGFloat = 340
 
     var body: some View {
         Group {
             if let image {
-                Image(nsImage: image).resizable().scaledToFit()
+                let size = fit(image.size)
+                Image(nsImage: image)
+                    .resizable()
+                    .frame(width: size.width, height: size.height)
             } else {
-                placeholder()
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.secondary.opacity(0.12))
+                    .frame(width: 220, height: min(220 / (file.aspectRatio ?? 1.6), maxH))
+                    .overlay(SiftSpinner())
             }
         }
-        .task(id: url) { await load() }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .overlay {
+            if opening {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.35))
+                    .overlay(SiftSpinner(color: .white))
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { open() }
+        .onHover { hovering in
+            guard image != nil else { return }
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .help("Quick Look")
+        .task(id: file.thumbURL) { await loadThumb() }
     }
 
-    private func load() async {
-        if let cached = Self.cache.object(forKey: url as NSURL) { image = cached; return }
-        guard let token = Keychain.read(SecretKey.slack) else { return }
+    /// Downscale-only fit into the cap; preserves the image's own aspect.
+    private func fit(_ size: NSSize) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return CGSize(width: maxW, height: maxW / 1.6) }
+        let scale = min(maxW / size.width, maxH / size.height, 1)
+        return CGSize(width: size.width * scale, height: size.height * scale)
+    }
+
+    private func loadThumb() async {
+        guard image == nil, let url = file.thumbURL else { return }
+        if let cached = AuthedImageCache.shared.object(forKey: url as NSURL) { image = cached; return }
+        guard let data = await SlackAuthedData.fetch(url), let loaded = NSImage(data: data) else { return }
+        AuthedImageCache.shared.setObject(loaded, forKey: url as NSURL)
+        image = loaded
+    }
+
+    private func open() {
+        guard !opening, let url = file.fullURL ?? file.thumbURL else { return }
+        opening = true
+        Task { @MainActor in
+            defer { opening = false }
+            guard let data = await SlackAuthedData.fetch(url) else { return }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("SiftImages", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let destination = dir.appendingPathComponent(file.name)
+            guard (try? data.write(to: destination)) != nil else { return }
+            QuickLook.shared.show(destination)
+        }
+    }
+}
+
+/// A token-authenticated GET against Slack (thumbnails / files live behind
+/// url_private, which needs the bearer token a plain AsyncImage can't send).
+private enum SlackAuthedData {
+    static func fetch(_ url: URL) async -> Data? {
+        guard let token = Keychain.read(SecretKey.slack) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let loaded = NSImage(data: data) else { return }
-        Self.cache.setObject(loaded, forKey: url as NSURL)
-        image = loaded
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+        return data
     }
 }
 
