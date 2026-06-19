@@ -104,11 +104,7 @@ struct MenuBarContent: View {
         // the traffic lights instead of below the titlebar's safe-area inset.
         ZStack(alignment: .top) {
             Color.themeHeader
-            if !state.hasConfigured {
-                OnboardingView()
-            } else {
-                listView
-            }
+            listView
         }
         .ignoresSafeArea()
         // Rebuild the whole tree on theme change so every view repaints at

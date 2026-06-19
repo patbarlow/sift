@@ -221,7 +221,7 @@ final class SyncWorker {
         let json: [String: Any]
         do {
             json = try await llm.sendForJSON(
-                tier: .smart,
+                tier: .fast,
                 system: Self.memoryExtractSystem,
                 userMessage: user,
                 maxTokens: 6000,
