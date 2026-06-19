@@ -69,7 +69,8 @@ ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -srcfolder "$STAGE" -volname "Sift" -format UDZO -fs HFS+ -o "$DMG" -quiet
 rm -rf "$STAGE"
-xcrun stapler staple "$DMG"
+# The app inside the DMG is already stapled — Gatekeeper accepts it.
+# Stapling the DMG itself requires a separate notarization submission, skip it.
 
 echo "▶ Signing the archive with the Sparkle key"
 SIGN_UPDATE="$(find .build/artifacts -name sign_update 2>/dev/null | head -1)"
