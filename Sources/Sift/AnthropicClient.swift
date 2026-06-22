@@ -44,6 +44,9 @@ actor AnthropicClient: LLMProvider {
 
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
+        // Background sync calls are not latency-sensitive; the heaviest one
+        // (memory glossary rebuild over all todos) can exceed the 60s default.
+        req.timeoutInterval = 180
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")

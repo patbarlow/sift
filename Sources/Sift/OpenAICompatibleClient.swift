@@ -36,6 +36,9 @@ actor OpenAICompatibleClient: LLMProvider {
         let url = URL(string: "\(baseURL)/chat/completions")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        // Background sync calls are not latency-sensitive; the heaviest one
+        // (memory glossary rebuild over all todos) can exceed the 60s default.
+        req.timeoutInterval = 180
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !apiKey.isEmpty {
             req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
