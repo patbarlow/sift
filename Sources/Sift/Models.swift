@@ -77,6 +77,9 @@ final class Todo {
     var snoozedUntil: Date?
     var snoozeWatchKey: String?
     var snoozeBaselineTs: String?
+    // Set when the user manually wakes an auto-snoozed (waiting-on-others) todo,
+    // so the assessor won't keep re-parking it.
+    var autoSnoozeOptOut: Bool = false
     // Deadline extracted from the thread ("I'll do it tomorrow", "by Friday").
     // Once this day arrives, the todo is treated as high priority.
     var dueDate: Date?
