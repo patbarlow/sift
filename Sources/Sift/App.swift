@@ -35,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var diagnosticWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+    private var syncAnimTimer: Timer?
+    private var syncAnimShowsFull = true
 
     // Auto-updates via Sparkle. Starts the updater (background checks honour
     // SUEnableAutomaticChecks in Info.plist); "Check for Updates…" is in the menu.
@@ -95,6 +97,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
 
         refreshStatusItem()
+
+        // Blink the menu-bar icon (tray.full <-> tray) while a sync runs.
+        state.$isSyncing
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] syncing in
+                syncing ? self?.startSyncAnimation() : self?.stopSyncAnimation()
+            }
+            .store(in: &cancellables)
 
         // Personalisation: appearance override.
         settings.$appearanceMode
@@ -306,11 +316,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let open = (try? ctx.fetch(FetchDescriptor<Todo>(predicate: p))) ?? []
         let count = open.filter { $0.isOpen && !$0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
         button.title = count > 0 ? " \(count)" : ""
+        // While syncing, the blink animation owns the image — don't fight it.
+        guard syncAnimTimer == nil else { return }
         button.image = NSImage(
             systemSymbolName: count > 0 ? "tray.full" : "checkmark.circle",
             accessibilityDescription: "Sift"
         )
     }
+
+    /// Blink the tray icon's contents on/off (tray.full <-> tray) to signal a
+    /// running sync — subtle, just the lines appearing and disappearing.
+    private func startSyncAnimation() {
+        guard syncAnimTimer == nil else { return }
+        syncAnimShowsFull = true
+        setStatusImage("tray.full")
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.syncAnimShowsFull.toggle()
+            self.setStatusImage(self.syncAnimShowsFull ? "tray.full" : "tray")
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        syncAnimTimer = timer
+    }
+
+    private func stopSyncAnimation() {
+        syncAnimTimer?.invalidate()
+        syncAnimTimer = nil
+        refreshStatusItem()   // restore the resting icon (count / checkmark)
+    }
+
+    private func setStatusImage(_ name: String) {
+        statusItem.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Sift")
+    }
+}
+
+/// Hosting view that refuses to let a click move the window, so SwiftUI controls
+/// sitting in the transparent title-bar area (the tabs and menu) stay clickable
+/// without dragging the window. Dragging is opt-in via `WindowDragHandle`, which
+/// calls `performDrag` explicitly.
+final class NonDraggingHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { false }
 }
 
 /// Floating window with a transparent titlebar — gives standard macOS traffic
@@ -347,7 +392,7 @@ final class TodoFloatingWindow: NSWindow, NSWindowDelegate {
         self.isMovable = true
         self.setFrameAutosaveName("SiftMainWindow")
 
-        let hosting = NSHostingView(
+        let hosting = NonDraggingHostingView(
             rootView: MenuBarContent(
                 onClose: onClose,
                 onSnap: { [weak self] action in self?.snap(action) },
@@ -430,7 +475,12 @@ final class TodoFloatingWindow: NSWindow, NSWindowDelegate {
     override var canBecomeMain: Bool { true }
 
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
-        let target = screen ?? self.screen ?? NSScreen.main
+        // Constrain to the screen the frame actually lands on (by its centre),
+        // not the window's current screen — otherwise snapping to another
+        // display gets clamped straight back onto the current one.
+        let center = NSPoint(x: frameRect.midX, y: frameRect.midY)
+        let target = NSScreen.screens.first { $0.frame.contains(center) }
+            ?? screen ?? self.screen ?? NSScreen.main
         guard let visible = target?.visibleFrame else {
             return super.constrainFrameRect(frameRect, to: screen)
         }
