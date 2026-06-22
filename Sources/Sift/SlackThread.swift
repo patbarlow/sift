@@ -66,8 +66,8 @@ final class ThreadLoader: ObservableObject {
     @Published var loading = true
     @Published var error: String?
 
-    private let channelID: String
-    private let parentTs: String
+    private var channelID: String
+    private var parentTs: String
 
     /// Workspace custom emoji (name → image URL). Workspace-wide and stable, so
     /// fetch once per app run and reuse across threads.
@@ -78,8 +78,13 @@ final class ThreadLoader: ObservableObject {
         self.parentTs = parentTs
     }
 
-    func load() async {
+    /// Load (or switch to) a thread. Pass a new channel/ts to view a different
+    /// merged source.
+    func load(channelID: String? = nil, parentTs: String? = nil) async {
+        if let channelID { self.channelID = channelID }
+        if let parentTs { self.parentTs = parentTs }
         loading = true
+        messages = []
         error = nil
         guard let token = Keychain.read(SecretKey.slack) else {
             error = "Slack isn't connected."
@@ -442,6 +447,33 @@ struct TodoDetailSheet: View {
     @StateObject private var loader: ThreadLoader
     @EnvironmentObject var settings: AppSettings
     @State private var contentHeight: CGFloat = 0
+    @State private var selectedSource = 0
+
+    /// A Slack thread backing this todo — the primary plus any merged sources.
+    struct Source: Identifiable {
+        let id: String          // threadKey
+        let label: String       // channel name
+        let channelID: String
+        let parentTs: String
+        let url: URL?
+    }
+
+    /// All Slack sources (primary first, then merged by merge order). Granola
+    /// sources are excluded — there's no thread to render.
+    private var slackSources: [Source] {
+        var out: [Source] = []
+        func add(_ key: String, _ label: String, _ url: URL?, _ kind: Todo.SourceKind) {
+            guard kind != .granola else { return }
+            let parts = key.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { return }
+            out.append(Source(id: key, label: label, channelID: parts[0], parentTs: parts[1], url: url))
+        }
+        add(todo.threadKey, todo.channelName, todo.sourceURL, todo.sourceKind)
+        for s in todo.extraSources.sorted(by: { $0.mergedAt < $1.mergedAt }) {
+            add(s.threadKey, s.channelName, s.sourceURL, s.sourceKind)
+        }
+        return out
+    }
 
     /// Keep the sheet inside the window, and let it hug short content. The body
     /// (everything below the fixed title) scrolls past `maxBodyHeight`;
@@ -459,8 +491,6 @@ struct TodoDetailSheet: View {
             parentTs: parts.count > 1 ? parts[1] : ""
         ))
     }
-
-    private var isSlack: Bool { todo.sourceKind != .granola }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -488,7 +518,6 @@ struct TodoDetailSheet: View {
                 .opacity(0)
                 .accessibilityHidden(true)
         }
-        .task { if isSlack { await loader.load() } }
     }
 
     /// Top margin that keeps the card's top edge fixed regardless of content
@@ -538,7 +567,7 @@ struct TodoDetailSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 DetailPanel(todo: todo)
-                if isSlack { threadContainer } else { granolaNote }
+                if !slackSources.isEmpty { threadContainer } else { granolaNote }
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
@@ -559,18 +588,31 @@ struct TodoDetailSheet: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// The Slack thread in its own rounded container: a header (channel name +
-    /// Open in Slack) over the messages.
+    /// The Slack thread in its own rounded container: a header (source switcher
+    /// when there's more than one merged source + Open in Slack) over messages.
     private var threadContainer: some View {
-        VStack(spacing: 0) {
+        let sources = slackSources
+        let index = min(selectedSource, sources.count - 1)
+        let current = sources[index]
+        return VStack(spacing: 0) {
             HStack(spacing: 6) {
                 IntegrationLogoView(logo: .slack, size: 14)
-                Text(todo.channelName.redacting(settings.redactionEnabled))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if sources.count > 1 {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(Array(sources.enumerated()), id: \.offset) { i, s in
+                                sourcePill(s, selected: i == index) { selectedSource = i }
+                            }
+                        }
+                    }
+                } else {
+                    Text(current.label.redacting(settings.redactionEnabled))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 8)
-                if let url = todo.sourceURL {
+                if let url = current.url {
                     SiftButton(variant: .secondary) { NSWorkspace.shared.open(url) } content: {
                         HStack(spacing: 5) {
                             IntegrationLogoView(logo: .slack, size: 13)
@@ -594,6 +636,21 @@ struct TodoDetailSheet: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
+        // Load the selected source (fires on appear and whenever you switch).
+        .task(id: current.id) { await loader.load(channelID: current.channelID, parentTs: current.parentTs) }
+    }
+
+    private func sourcePill(_ source: Source, selected: Bool, _ tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            Text(source.label.redacting(settings.redactionEnabled))
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(selected ? Color.themeAccent.opacity(0.18) : Color.primary.opacity(0.06)))
+                .foregroundStyle(selected ? Color.themeAccent : Color.secondary)
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
