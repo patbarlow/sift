@@ -1734,6 +1734,11 @@ final class SyncWorker {
     teammates have already made). The user's name and aliases are given in the
     IDENTITY section below; their own messages are marked "[ME]".
 
+    ALWAYS return the JSON object, even when you cannot assess the thread. If the
+    thread is empty, fragmentary, or you lack the context to judge it, return
+    {"status": "skip"} with low confidences. NEVER reply with prose, a question,
+    or an apology — only the JSON.
+
     Return ONLY a JSON object:
       "status": "skip" | "open" | "in_progress" | "waiting" | "done"
       "classification": "todo" | "update"  (only meaningful when status != "skip")
@@ -1822,9 +1827,16 @@ final class SyncWorker {
         colleague to do X ("can you grab X", "you get the list from <client>,
         then we'll do Y"). The action is now THEIRS; the user is waiting on them
         to deliver before the user's own part can continue.
-      * The user asked a question or made a request and hasn't heard back yet.
-      * The user is blocked on a reply, deliverable, or approval from someone
-        else.
+      * The user is BLOCKED on someone's reply, input, decision, deliverable, or
+        approval to CONTINUE THEIR OWN WORK — once it lands, the user has a
+        concrete thing they will then do. Parking it lets them get on with other
+        work meanwhile.
+      Asking a question is "waiting" ONLY if the user's own work depends on the
+      answer. A bare clarifying or FYI question — where the reply would just
+      inform the user, with no task of theirs hanging on it — is NOT a todo: use
+      "skip". Especially in a thread the user isn't otherwise part of, a one-off
+      question they dropped in is "skip" unless a concrete action of theirs
+      hinges on the reply.
       Use the people context to tell colleagues from clients — delegating to a
       teammate, or waiting on a client/partner, both count. This is DIFFERENT
       from "done": "done" means nothing comes back to the user; "waiting" means
@@ -1985,6 +1997,13 @@ final class SyncWorker {
     private func assessThread(replies: [SlackClient.Message],
                               channelName: String,
                               existingTitle: String?) async throws -> ThreadAssessment {
+        // Nothing to assess — a textless thread (e.g. a file-only post the
+        // participant search matched). Skip without spending an LLM call.
+        guard replies.contains(where: { $0.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }) else {
+            return ThreadAssessment(status: .skip, classification: .todo, priority: .normal,
+                                    priorityReason: nil, due: nil, note: nil,
+                                    forYouConfidence: 0, doneConfidence: 0, forYouReason: nil)
+        }
         let parent = replies.first
         let reactionList = (parent?.reactions ?? [])
             .map { r in
