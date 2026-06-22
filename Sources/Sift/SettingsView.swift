@@ -530,6 +530,7 @@ struct DangerZonePane: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var settings: AppSettings
     @Environment(\.modelContext) private var ctx
+    @ObservedObject private var usage = LLMUsageStore.shared
     @Binding var modal: SiftModalConfig?
 
     /// A task button that shows a spinner + running label and disables all
@@ -571,6 +572,14 @@ struct DangerZonePane: View {
                     TimelineView(.periodic(from: Date(), by: 30)) { _ in
                         Text(nextSyncLabel(next)).font(.caption2).foregroundStyle(.tertiary)
                     }
+                }
+            }
+
+            if usage.hasCacheData {
+                SettingsCard(title: "LLM usage", subtitle: "Tokens sent to your AI provider, and how much was served straight from the prompt cache.") {
+                    usageRows("Today", usage.today)
+                    Divider().opacity(0.4)
+                    usageRows("All time", usage.lifetime)
                 }
             }
 
@@ -637,6 +646,42 @@ struct DangerZonePane: View {
         settings.granolaConfigured = false
         state.refreshConfigured()
     }
+
+    @ViewBuilder
+    private func usageRows(_ label: String, _ t: LLMUsageStore.Totals) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(label).font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(Self.pct(t.cacheHitRate)) from cache")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 18) {
+                stat("Input", Self.compact(t.totalInput))
+                stat("Cached", Self.compact(t.cacheReadTokens))
+                stat("Output", Self.compact(t.outputTokens))
+            }
+        }
+    }
+
+    private func stat(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value).font(.system(size: 14, weight: .semibold, design: .rounded).monospacedDigit())
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private static func compact(_ n: Int) -> String {
+        let d = Double(n)
+        switch n {
+        case 1_000_000...: return String(format: "%.1fM", d / 1_000_000)
+        case 10_000...: return String(format: "%.0fK", d / 1_000)
+        case 1_000...: return String(format: "%.1fK", d / 1_000)
+        default: return "\(n)"
+        }
+    }
+
+    private static func pct(_ r: Double) -> String { "\(Int((r * 100).rounded()))%" }
 
     private func relative(_ d: Date) -> String {
         let f = RelativeDateTimeFormatter()
