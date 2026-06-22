@@ -52,16 +52,33 @@ actor OpenAICompatibleClient: LLMProvider {
 
         struct Response: Decodable {
             let choices: [Choice]
+            let usage: Usage?
             struct Choice: Decodable {
                 let message: Message
                 struct Message: Decodable {
                     let content: String?
                 }
             }
+            struct Usage: Decodable {
+                let prompt_tokens: Int?
+                let completion_tokens: Int?
+                let prompt_tokens_details: Details?
+                struct Details: Decodable { let cached_tokens: Int? }
+            }
         }
 
         do {
             let r = try JSONDecoder().decode(Response.self, from: data)
+            if let u = r.usage {
+                // OpenAI-style prompt_tokens includes any cached prefix; split it
+                // out so the cache-hit maths matches the Anthropic path.
+                let cached = u.prompt_tokens_details?.cached_tokens ?? 0
+                await LLMUsageStore.shared.record(
+                    input: max(0, (u.prompt_tokens ?? 0) - cached),
+                    output: u.completion_tokens ?? 0,
+                    cacheRead: cached,
+                    cacheCreation: 0)
+            }
             return r.choices.first?.message.content ?? ""
         } catch {
             throw LLMError.decode("\(error) — \(String(data: data, encoding: .utf8)?.prefix(200) ?? "")")

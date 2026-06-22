@@ -59,11 +59,25 @@ actor AnthropicClient: LLMProvider {
 
         struct Response: Decodable {
             let content: [Content]
+            let usage: Usage?
             struct Content: Decodable { let type: String; let text: String? }
+            struct Usage: Decodable {
+                let input_tokens: Int?
+                let output_tokens: Int?
+                let cache_read_input_tokens: Int?
+                let cache_creation_input_tokens: Int?
+            }
         }
 
         do {
             let r = try JSONDecoder().decode(Response.self, from: data)
+            if let u = r.usage {
+                await LLMUsageStore.shared.record(
+                    input: u.input_tokens ?? 0,
+                    output: u.output_tokens ?? 0,
+                    cacheRead: u.cache_read_input_tokens ?? 0,
+                    cacheCreation: u.cache_creation_input_tokens ?? 0)
+            }
             return r.content.compactMap(\.text).joined()
         } catch {
             throw LLMError.decode("\(error) — \(String(data: data, encoding: .utf8)?.prefix(200) ?? "")")
