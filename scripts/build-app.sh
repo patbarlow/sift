@@ -32,6 +32,9 @@ cp Sources/Sift/Resources/*.svg "$APP/Contents/Resources/"
 # Embed Sparkle.framework (auto-updates) and point the binary at it.
 if [ -d "$BIN_DIR/Sparkle.framework" ]; then
     cp -R "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/"
+    # cp -R creates AppleDouble sidecar files (._*) that break Gatekeeper's
+    # seal check — strip them before signing.
+    find "$APP/Contents/Frameworks/Sparkle.framework" -name '._*' -delete
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Sift" 2>/dev/null || true
 fi
 

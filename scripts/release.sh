@@ -26,6 +26,7 @@ NOTARY_PROFILE="${SIFT_NOTARY_PROFILE:-sift-notary}"
 REPO="patbarlow/sift"
 APP="Sift.app"
 ZIP="dist/Sift-$VERSION.zip"
+DMG="dist/Sift-$VERSION.dmg"
 DL_URL="https://github.com/$REPO/releases/download/v$VERSION/Sift-$VERSION.zip"
 
 case "$IDENTITY" in
@@ -61,6 +62,16 @@ echo "▶ Stapling the ticket onto the app"
 xcrun stapler staple "$APP"
 rm -f "$ZIP"; ditto -c -k --keepParent "$APP" "$ZIP"   # re-zip so the ticket ships
 
+echo "▶ Creating DMG"
+STAGE=$(mktemp -d)
+cp -R "$APP" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+hdiutil create -srcfolder "$STAGE" -volname "Sift" -format UDZO -fs HFS+ -o "$DMG" -quiet
+rm -rf "$STAGE"
+# The app inside the DMG is already stapled — Gatekeeper accepts it.
+# Stapling the DMG itself requires a separate notarization submission, skip it.
+
 echo "▶ Signing the archive with the Sparkle key"
 SIGN_UPDATE="$(find .build/artifacts -name sign_update 2>/dev/null | head -1)"
 [ -n "$SIGN_UPDATE" ] || { echo "✗ sign_update not found — run 'swift build' first"; exit 1; }
@@ -83,9 +94,9 @@ awk '/RELEASES: release.sh inserts/{print; while ((getline line < "dist/item.xml
 rm -f dist/item.xml
 
 echo "▶ Publishing GitHub Release v$VERSION"
-gh release create "v$VERSION" "$ZIP" --repo "$REPO" --title "Sift $VERSION" \
+gh release create "v$VERSION" "$DMG" "$ZIP" --repo "$REPO" --title "Sift $VERSION" \
     --notes "Auto-updates via Sparkle." 2>/dev/null \
-  || gh release upload "v$VERSION" "$ZIP" --repo "$REPO" --clobber
+  || gh release upload "v$VERSION" "$DMG" "$ZIP" --repo "$REPO" --clobber
 
 git add appcast.xml
 git commit -q -m "release: v$VERSION"

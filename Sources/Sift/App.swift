@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
     private var window: TodoFloatingWindow!
+    private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var diagnosticWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
@@ -115,10 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.hasConfigured {
             state.startScheduler()
         } else {
-            // It's a menu-bar app (no Dock icon, no window on launch), so a new
-            // user who opens it would otherwise see nothing. Surface onboarding.
-            NSApp.activate(ignoringOtherApps: true)
-            window.show(near: statusItem.button)
+            openOnboarding()
         }
 
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -253,6 +251,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func openOnboarding() {
+        if onboardingWindow == nil {
+            let host = NSHostingView(
+                rootView: OnboardingView(onComplete: { [weak self] in
+                    self?.onboardingWindow?.orderOut(nil)
+                    NSApp.setActivationPolicy(.accessory)
+                })
+                .environmentObject(state)
+                .environmentObject(settings)
+                .modelContainer(container)
+            )
+            host.autoresizingMask = [.width, .height]
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            win.title = "Welcome to Sift"
+            win.titlebarAppearsTransparent = true
+            win.titleVisibility = .hidden
+            win.isMovableByWindowBackground = true
+            win.isReleasedWhenClosed = false
+            win.contentView = host
+            onboardingWindow = win
+        }
+        openRealWindow(onboardingWindow)
+    }
+
     @objc func openDiagnostic() {
         if diagnosticWindow == nil {
             let host = NSHostingView(
@@ -272,11 +299,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             win.isReleasedWhenClosed = false
             win.level = .floating
             win.contentView = host
+            NotificationCenter.default.addObserver(self, selector: #selector(realWindowClosed),
+                                                   name: NSWindow.willCloseNotification, object: win)
             diagnosticWindow = win
         }
-        NSApp.activate(ignoringOtherApps: true)
-        diagnosticWindow?.makeKeyAndOrderFront(nil)
-        diagnosticWindow?.center()
+        openRealWindow(diagnosticWindow)
     }
 
     @objc func openSettings() {
@@ -300,11 +327,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             win.isReleasedWhenClosed = false
             win.level = .floating
             win.contentView = host
+            NotificationCenter.default.addObserver(self, selector: #selector(realWindowClosed),
+                                                   name: NSWindow.willCloseNotification, object: win)
             settingsWindow = win
         }
+        openRealWindow(settingsWindow)
+    }
+
+    // Bring a settings/diagnostic window forward and temporarily become a regular
+    // app so it shows in Cmd-Tab, Mission Control, and Force Quit.
+    private func openRealWindow(_ win: NSWindow?) {
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        settingsWindow?.center()
+        win?.makeKeyAndOrderFront(nil)
+        win?.center()
+    }
+
+    @objc private func realWindowClosed(_ notification: Notification) {
+        // Check after the close completes, then restore accessory policy if no
+        // real windows remain open.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let anyOpen = (self.onboardingWindow?.isVisible == true)
+                       || (self.settingsWindow?.isVisible == true)
+                       || (self.diagnosticWindow?.isVisible == true)
+            if !anyOpen { NSApp.setActivationPolicy(.accessory) }
+        }
     }
 
     private func refreshStatusItem() {
@@ -485,12 +533,8 @@ final class TodoFloatingWindow: NSWindow, NSWindowDelegate {
             return super.constrainFrameRect(frameRect, to: screen)
         }
         var f = frameRect
-        f.size.width = min(f.size.width, visible.width)
-        f.size.height = min(f.size.height, visible.height)
+        // Only keep the top edge on-screen so the window is always grabbable.
         if f.maxY > visible.maxY { f.origin.y = visible.maxY - f.height }
-        if f.minY < visible.minY { f.origin.y = visible.minY }
-        if f.maxX > visible.maxX { f.origin.x = visible.maxX - f.width }
-        if f.minX < visible.minX { f.origin.x = visible.minX }
         return f
     }
 }
