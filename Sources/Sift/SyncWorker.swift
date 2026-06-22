@@ -616,10 +616,10 @@ final class SyncWorker {
     // MARK: - Consolidation
 
     /// Largest group the clustering pass will merge in one go. A genuine work
-    /// item rarely spans more than a handful of threads; a bigger group almost
-    /// always means the model fell back to grouping by customer (the failure
+    /// item rarely spans more than 2–3 threads; a bigger group almost always
+    /// means the model fell back to grouping by customer/people (the failure
     /// mode that previously suppressed all new todos), so we skip it.
-    private static let maxMergeGroupSize = 6
+    private static let maxMergeGroupSize = 3
 
     private static let clusterSystem = """
     You group a person's todos into distinct WORK ITEMS so duplicates collapse
@@ -634,6 +634,9 @@ final class SyncWorker {
 
     Keep todos SEPARATE when they are merely RELATED. Related is not the same:
     - Same customer or project, different task → SEPARATE.
+    - Same people/contacts involved (the same teammate, the same customer
+      contact) → SEPARATE unless the deliverable is identical. Shared people are
+      NOT evidence of the same work item.
     - Different bugs, features, or asks → SEPARATE, even within one thread.
     - One follows from or depends on the other but is its own piece of work →
       SEPARATE.
@@ -642,6 +645,17 @@ final class SyncWorker {
       "#ext-subscriber-<customer>" channel names the customer) to tell them
       apart. A DM or ticket from one customer's contact is never the same work
       item as another customer's thread, even if the topic looks similar.
+
+    Worked example — these are THREE separate work items, NOT one, even though
+    every thread is the same customer (Halter) with the same people:
+    - "Fix numbered-list rendering in the Halter workflow"
+    - "Confirm the assignee / how to hand off to the Lorikeet agent"
+    - "Re-enable the FAQ workflow after safety checks"
+    Same customer + same people + adjacent topics is NOT one deliverable.
+
+    The test is strict: only merge if you can name the ONE concrete artifact,
+    bug, or decision both todos are about. If the most specific thing they share
+    is a customer, a channel, a person, or a theme, keep them SEPARATE.
 
     When unsure, keep them separate. Over-merging is worse than missing a merge:
     merged todos share one open/closed state, so a wrong merge makes finished
@@ -661,10 +675,17 @@ final class SyncWorker {
     work item — the same deliverable, bug, or ask — such that finishing one
     finishes them all.
 
-    Sharing a customer, project, channel, or theme is NOT enough; that is
-    "related", which must stay separate. Tasks that merely depend on or follow
-    from each other are also separate. If they involve DIFFERENT customers or
-    different external people/companies, they are NOT the same — score near 0.
+    Sharing a customer, project, channel, theme, or the same people is NOT
+    enough; that is "related", which must stay separate. Tasks that merely
+    depend on or follow from each other are also separate. If they involve
+    DIFFERENT customers or different external people/companies, they are NOT the
+    same — score near 0.
+
+    Your "reason" MUST name the single concrete artifact, bug, or decision all
+    the todos are about (e.g. "all fix the same numbered-list rendering bug"). If
+    you cannot name one specific shared deliverable — if the most specific thing
+    they share is a customer, channel, person, or theme — they are NOT the same;
+    score below 0.5.
 
     Return ONLY JSON: { "confidence": 0.0-1.0, "reason": "one line" }
     "confidence" = how sure they're the SAME work item: ~1 = certainly the same,
@@ -681,7 +702,8 @@ final class SyncWorker {
 
         let listing = open.enumerated().map { i, t in
             let src = t.sourcePills.map(\.label).joined(separator: ", ")
-            return "[\(i)] \(t.title)\n    customer: \(t.customer ?? "internal")\n    source: \(src)\n    \(t.summary.prefix(300))"
+            let reason = (t.priorityReason?.isEmpty == false) ? "\n    why it matters: \(t.priorityReason!)" : ""
+            return "[\(i)] deliverable: \(t.title)\n    customer: \(t.customer ?? "internal")\n    source: \(src)\(reason)\n    detail: \(t.summary)"
         }.joined(separator: "\n\n")
 
         let json: [String: Any]
@@ -717,7 +739,7 @@ final class SyncWorker {
             let label = (group["work_item"] as? String) ?? ""
             let memberDesc = members.map { t in
                 let src = t.sourcePills.map(\.label).joined(separator: ", ")
-                return "- \(t.title) (customer: \(t.customer ?? "internal")) [\(src)]: \(t.summary.prefix(300))"
+                return "- deliverable: \(t.title) (customer: \(t.customer ?? "internal")) [\(src)]\n  detail: \(t.summary)"
             }.joined(separator: "\n")
             let verdict: [String: Any]
             do {
@@ -734,7 +756,7 @@ final class SyncWorker {
             }
             let mergeConfidence = (verdict["confidence"] as? Double)
                 ?? (verdict["confidence"] as? NSNumber)?.doubleValue ?? 0
-            if mergeConfidence < 0.5 { continue }   // not the same work
+            if mergeConfidence < 0.6 { continue }   // not the same work
 
             // Prefer an already-established work item (one that has absorbed
             // sources) as the anchor, then the earliest-created. This keeps the
@@ -748,7 +770,7 @@ final class SyncWorker {
 
             // Middling confidence → suggest the merge for review instead of
             // doing it. Flag each other member pointing at the primary.
-            if mergeConfidence < 0.8 {
+            if mergeConfidence < 0.9 {
                 let reason = (verdict["reason"] as? String) ?? "Looks like the same work as \"\(primary.title)\"."
                 for todo in members where todo !== primary
                     && todo.reviewKindEnum == nil && !todo.excludeFromAutoMerge {
