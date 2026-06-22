@@ -308,12 +308,15 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Wake a snoozed todo back into the active lists.
+    /// Wake a snoozed todo back into the active lists. Manually waking it also
+    /// opts out of auto-snoozing — if you pulled it back, the assessor shouldn't
+    /// keep parking it as "waiting on someone else".
     func unsnooze(_ todo: Todo) {
         applySnooze(todo, activity: .woke) { t in
             t.snoozedUntil = nil
             t.snoozeWatchKey = nil
             t.snoozeBaselineTs = nil
+            t.autoSnoozeOptOut = true
             t.lastActivityAt = Date()   // fresh, so it doesn't read as stale immediately
         }
     }

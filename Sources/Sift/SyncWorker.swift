@@ -553,7 +553,7 @@ final class SyncWorker {
         switch assessment.status {
         case .skip, .done:
             return nil
-        case .open, .inProgress:
+        case .open, .inProgress, .waiting:
             // Too unsure it's the user's → don't even surface it.
             if assessment.forYouConfidence < 0.45 { return nil }
             let summary = try await summariseThread(
@@ -600,6 +600,14 @@ final class SyncWorker {
                 todo.reviewConfidence = assessment.forYouConfidence
                 todo.reviewReason = assessment.forYouReason ?? assessment.note
                     ?? "Not sure this is yours to action."
+            }
+            // Waiting on someone else: park it on the thread so it surfaces when
+            // they reply, rather than sitting in the active list. (Review items
+            // get triaged first, so don't pre-park those.)
+            if assessment.status == .waiting && !todo.pendingReview {
+                todo.snoozeWatchKey = canonicalKey
+                todo.snoozeBaselineTs = lastTs
+                Activity.log(.snoozed, todo.title, detail: "waiting on a reply", ctx: ctx)
             }
             return IngestOutcome(todo: todo, mergedInto: nil)
         }
@@ -1337,6 +1345,30 @@ final class SyncWorker {
                 todo.dueDate = assessment.due
                 todo.updatedAt = Date()
                 report.refreshed += 1
+            case .waiting:
+                if wasDone {
+                    todo.completedAt = nil
+                    todo.completionReason = nil
+                    ctx.insert(TodoComment(todo: todo, body: assessment.note ?? "Re-opened — waiting on someone else", isAutoTriage: true))
+                }
+                todo.status = TodoStatus.open.rawValue
+                todo.workingQuote = nil
+                todo.workingChannel = nil
+                if !todo.priorityOverridden {
+                    todo.priority = assessment.priority.rawValue
+                    todo.priorityReason = assessment.priorityReason
+                }
+                todo.dueDate = assessment.due
+                // Park it until the thread moves — unless the user pulled it back
+                // (opted out) or it's already parked.
+                if !todo.autoSnoozeOptOut && !todo.isSnoozed {
+                    todo.snoozeWatchKey = "\(active.channelID):\(active.parentTs)"
+                    todo.snoozeBaselineTs = lastTs
+                    todo.snoozedUntil = nil
+                    Activity.log(.snoozed, todo.title, detail: "waiting on a reply", ctx: ctx)
+                }
+                todo.updatedAt = Date()
+                report.refreshed += 1
             }
 
             // Backfill the customer for todos created before this existed.
@@ -1661,7 +1693,7 @@ final class SyncWorker {
     // MARK: - LLM: thread assessment (Haiku)
 
     private struct ThreadAssessment {
-        enum Status { case skip, open, inProgress, done }
+        enum Status { case skip, open, inProgress, waiting, done }
         let status: Status
         let classification: TodoClassification
         let priority: TodoPriority
@@ -1681,7 +1713,7 @@ final class SyncWorker {
     IDENTITY section below; their own messages are marked "[ME]".
 
     Return ONLY a JSON object:
-      "status": "skip" | "open" | "in_progress" | "done"
+      "status": "skip" | "open" | "in_progress" | "waiting" | "done"
       "classification": "todo" | "update"  (only meaningful when status != "skip")
       "priority": "high" | "normal" | "low"  (only meaningful when open/in_progress)
       "priority_reason": one sentence (≤ 15 words) in SECOND PERSON — address
@@ -1707,10 +1739,14 @@ final class SyncWorker {
     currently-outstanding action that THE USER PERSONALLY must take — e.g. a
     question directed at the user they haven't answered, or a task the user
     committed to ([ME] said they'd do X) that isn't finished yet.
-      * No such personal action outstanding → "done" (or "skip" if it was never
-        really theirs). This holds EVEN IF the thread is active and in the
-        user's domain (their customer, their project). Other people working a
-        thread the user cares about is not a task for the user.
+      * No personal action outstanding RIGHT NOW, but the user is waiting on
+        someone else to reply or deliver something the user will then act on
+        (including a step the user handed to a teammate) → "waiting".
+      * No such personal action outstanding and nothing is expected back to the
+        user → "done" (or "skip" if it was never really theirs). This holds EVEN
+        IF the thread is active and in the user's domain (their customer, their
+        project). Other people working a thread the user cares about is not a
+        task for the user.
       * "Monitoring", "staying across it", "keeping an eye on it", or being
         looped in for awareness are NOT actionable — they do not justify
         "open"/"in_progress". If that's all that's left for the user, it's "done".
@@ -1757,6 +1793,22 @@ final class SyncWorker {
       * Someone is waiting on the user to respond / act
       * A follow-up question was posted AFTER the user's earlier reply and
         the user hasn't responded to it yet
+
+    "waiting" — the next move is someone ELSE'S, and the user is waiting on it
+    before they can act (it's expected to come back to them):
+      * The user DELEGATED the next step to a teammate — [ME] asked or told a
+        colleague to do X ("can you grab X", "you get the list from <client>,
+        then we'll do Y"). The action is now THEIRS; the user is waiting on them
+        to deliver before the user's own part can continue.
+      * The user asked a question or made a request and hasn't heard back yet.
+      * The user is blocked on a reply, deliverable, or approval from someone
+        else.
+      Use the people context to tell colleagues from clients — delegating to a
+      teammate, or waiting on a client/partner, both count. This is DIFFERENT
+      from "done": "done" means nothing comes back to the user; "waiting" means
+      they expect a reply or result they'll then act on. When the only thing
+      left is someone else's move that loops back to the user, prefer "waiting"
+      over both "open" (it isn't the user's move yet) and "done" (it isn't over).
 
     --- WHO IS THE USER ---
     Each thread line is prefixed with its author: "[ME]" for the user, otherwise
@@ -1956,6 +2008,7 @@ final class SyncWorker {
             case "skip": return .skip
             case "done": return .done
             case "in_progress": return .inProgress
+            case "waiting": return .waiting
             default: return .open
             }
         }()
