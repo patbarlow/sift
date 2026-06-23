@@ -378,6 +378,14 @@ extension Todo {
         statusEnum == .open || statusEnum == .inProgress
     }
 
+    /// The next move is someone else's — parked but still tracked. A pure
+    /// status, distinct from the snooze overlay.
+    var isWaiting: Bool { statusEnum == .waiting }
+
+    /// Everything still being tracked (not done/archived) — the set that can
+    /// go stale, be swept, or be refreshed.
+    var isActive: Bool { isOpen || isWaiting }
+
     /// Days of inactivity after which an active todo is flagged stale, and
     /// after which a stale todo is auto-archived.
     static let staleAfterDays: Double = 7
@@ -388,8 +396,10 @@ extension Todo {
     var activityClock: Date { lastActivityAt ?? lastSlackActivity }
 
     /// Active but quiet for a week — still tracked and revivable, just flagged.
+    /// Applies to waiting items too: a parked item whose reply never came goes
+    /// cold like any other.
     var isStale: Bool {
-        guard isOpen else { return false }
+        guard isActive else { return false }
         return Date().timeIntervalSince(activityClock) > Self.staleAfterDays * 86400
     }
 
@@ -412,6 +422,7 @@ extension Todo {
 enum TodoStatus: String {
     case open
     case inProgress = "in_progress"
+    case waiting
     case done
     case archived
 }
@@ -447,7 +458,7 @@ final class ActivityEvent {
 }
 
 enum ActivityKind: String {
-    case created, review, merged, snoozed, woke, autoDone, manualDone, reopened, archived, accepted, declined, unmerged
+    case created, review, merged, snoozed, woke, autoDone, manualDone, reopened, archived, accepted, declined, unmerged, parked
 
     var verb: String {
         switch self {
@@ -463,6 +474,7 @@ enum ActivityKind: String {
         case .accepted: return "Accepted suggestion"
         case .declined: return "Declined suggestion"
         case .unmerged: return "Unmerged"
+        case .parked: return "Waiting on others"
         }
     }
 
@@ -479,6 +491,7 @@ enum ActivityKind: String {
         case .accepted: return "checkmark"
         case .declined: return "xmark"
         case .unmerged: return "arrow.uturn.backward"
+        case .parked: return "hourglass"
         }
     }
 }

@@ -303,7 +303,7 @@ final class SyncWorker {
     private func archiveStaleTodos(ctx: ModelContext, report: inout Report) {
         let all = (try? ctx.fetch(FetchDescriptor<Todo>())) ?? []
         let now = Date()
-        for todo in all where todo.isOpen && !todo.pendingReview {
+        for todo in all where todo.isActive && !todo.pendingReview {
             let inactiveDays = now.timeIntervalSince(todo.activityClock) / 86400
             guard inactiveDays >= Todo.archiveAfterDays else { continue }
             todo.status = TodoStatus.archived.rawValue
@@ -575,12 +575,14 @@ final class SyncWorker {
                 ?? fallbackPermalink
 
             let lastTs = resolved.last?.ts ?? rootTs
+            let storedStatus: TodoStatus = assessment.status == .inProgress ? .inProgress
+                : assessment.status == .waiting ? .waiting : .open
             let todo = Todo(
                 threadKey: canonicalKey,
                 title: summary.title,
                 summary: summary.summary,
                 classification: assessment.classification.rawValue,
-                status: assessment.status == .inProgress ? TodoStatus.inProgress.rawValue : TodoStatus.open.rawValue,
+                status: storedStatus.rawValue,
                 channelID: channelID,
                 channelName: channelName,
                 sourceURL: permalink,
@@ -601,13 +603,10 @@ final class SyncWorker {
                 todo.reviewReason = assessment.forYouReason ?? assessment.note
                     ?? "Not sure this is yours to action."
             }
-            // Waiting on someone else: park it on the thread so it surfaces when
-            // they reply, rather than sitting in the active list. (Review items
-            // get triaged first, so don't pre-park those.)
-            if assessment.status == .waiting && !todo.pendingReview {
-                todo.snoozeWatchKey = canonicalKey
-                todo.snoozeBaselineTs = lastTs
-                Activity.log(.snoozed, todo.title, detail: "waiting on a reply", ctx: ctx)
+            // Waiting on someone else is now a first-class status (parked but
+            // visible in Snoozed → "Waiting on others"), not an auto-snooze.
+            if storedStatus == .waiting {
+                Activity.log(.parked, todo.title, detail: "waiting on someone else", ctx: ctx)
             }
             return IngestOutcome(todo: todo, mergedInto: nil)
         }
@@ -1262,6 +1261,12 @@ final class SyncWorker {
             let lastTs = replies.last?.ts ?? active.lastSeen
             let hasNewMessages = compareTs(lastTs, active.lastSeen) > 0
 
+            // Waiting items are parked on someone else's move — only re-assess
+            // when the thread actually advances (or a forced sync). Skipping the
+            // periodic 12h re-check keeps quiet parked items from burning LLM
+            // calls; the archive sweep retires them if they go truly cold.
+            if todo.statusEnum == .waiting && !hasNewMessages && !force { continue }
+
             // Re-assess if: (a) new messages in thread, or (b) todo has been
             // open/in_progress for 12+ hours since last assessment. This
             // ensures stale todos eventually close even without new activity.
@@ -1373,7 +1378,12 @@ final class SyncWorker {
                     todo.completionReason = nil
                     ctx.insert(TodoComment(todo: todo, body: assessment.note ?? "Re-opened — waiting on someone else", isAutoTriage: true))
                 }
-                todo.status = TodoStatus.open.rawValue
+                // First-class status: parked but visible (Snoozed → "Waiting on
+                // others"), woken by new thread activity rather than a watch key.
+                if oldStatus != .waiting {
+                    Activity.log(.parked, todo.title, detail: "waiting on someone else", ctx: ctx)
+                }
+                todo.status = TodoStatus.waiting.rawValue
                 todo.workingQuote = nil
                 todo.workingChannel = nil
                 if !todo.priorityOverridden {
@@ -1381,14 +1391,6 @@ final class SyncWorker {
                     todo.priorityReason = assessment.priorityReason
                 }
                 todo.dueDate = assessment.due
-                // Park it until the thread moves — unless the user pulled it back
-                // (opted out) or it's already parked.
-                if !todo.autoSnoozeOptOut && !todo.isSnoozed {
-                    todo.snoozeWatchKey = "\(active.channelID):\(active.parentTs)"
-                    todo.snoozeBaselineTs = lastTs
-                    todo.snoozedUntil = nil
-                    Activity.log(.snoozed, todo.title, detail: "waiting on a reply", ctx: ctx)
-                }
                 todo.updatedAt = Date()
                 report.refreshed += 1
             }
@@ -1402,7 +1404,8 @@ final class SyncWorker {
             // Keep the title/summary current as the thread evolves — re-write
             // them when there's genuinely new content and the item is still
             // live. (No point re-summarising something we just closed.)
-            if (hasNewMessages || force), todo.statusEnum == .open || todo.statusEnum == .inProgress {
+            if (hasNewMessages || force),
+               todo.statusEnum == .open || todo.statusEnum == .inProgress || todo.statusEnum == .waiting {
                 if let s = try? await summariseThread(
                     replies: resolved,
                     channelName: channelName,
@@ -1416,9 +1419,8 @@ final class SyncWorker {
 
             // Note: we no longer log a comment for every reassessment. The
             // summary above now tracks the current state, so per-activity notes
-            // were just noise. Status transitions (done / reopen) still leave a
-            // note via the cases above — those are the meaningful events.
-            _ = oldStatus
+            // were just noise. Status transitions (done / reopen / parked) still
+            // leave a note or activity via the cases above — the meaningful events.
 
             if hasNewMessages {
                 // Mark seen on whichever thread we actually assessed.
@@ -1843,6 +1845,18 @@ final class SyncWorker {
       they expect a reply or result they'll then act on. When the only thing
       left is someone else's move that loops back to the user, prefer "waiting"
       over both "open" (it isn't the user's move yet) and "done" (it isn't over).
+      BALL-BACK RULE (decides waiting vs open): the LATEST message decides who
+      owes the next move, and that OVERRIDES how the thread opened. If the most
+      recent message asks the user a question, requests a decision, or hands
+      something back for the user to answer or approve, the ball is now the
+      USER'S → "open" (or "in_progress" if a [ME] reply is already underway) —
+      EVEN IF the user opened the thread asking others for help. Stay "waiting"
+      only when the latest message genuinely leaves the next move with someone
+      else. Worked example: the user asks a teammate to help unblock something
+      (opens like waiting); the teammate replies with a question back at the user
+      ("what's the generic shape here — does this come up a lot?"). That question
+      is aimed at the user, so the ball has returned to them: "open", NOT
+      "waiting".
 
     --- WHO IS THE USER ---
     Each thread line is prefixed with its author: "[ME]" for the user, otherwise

@@ -186,9 +186,12 @@ struct TodosScrollView: View {
     }
 
     var visible: [Todo] {
-        // Stale tab shows the quiet-but-active items; Todos shows the rest.
+        // Stale tab shows the quiet-but-active items (including parked ones);
+        // Todos shows the live, ball-in-your-court rest. Waiting items live in
+        // the Snoozed tab until they go stale.
         let active = openTodos.filter { !$0.isSnoozed && !$0.pendingReview }
-        let base = tab == .stale ? active.filter(\.isStale) : active.filter { !$0.isStale }
+        let base = tab == .stale ? active.filter(\.isStale)
+                                 : active.filter { !$0.isStale && !$0.isWaiting }
         // High-priority first; recency breaks ties (the fetch is date-sorted,
         // but make the tiebreak explicit rather than relying on sort stability).
         return base.sorted {
@@ -202,6 +205,20 @@ struct TodosScrollView: View {
             VStack(alignment: .leading, spacing: 18) {
                 if visible.isEmpty && !state.isSyncing {
                     emptyState
+                } else if tab == .stale {
+                    // The Stale tab has its own meaningful split — who owes the
+                    // next move — regardless of the user's grouping preference.
+                    ForEach(staleGroups, id: \.title) { section in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(section.title)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .textCase(.uppercase)
+                            VStack(alignment: .leading, spacing: 14) {
+                                ForEach(section.todos) { IssueRow(todo: $0) }
+                            }
+                        }
+                    }
                 } else if settings.groupingMode == .none {
                     VStack(alignment: .leading, spacing: 14) {
                         ForEach(visible) { todo in
@@ -247,6 +264,7 @@ struct TodosScrollView: View {
                 switch todo.statusEnum {
                 case .inProgress: return "In progress"
                 case .open: return "Open"
+                case .waiting: return "Waiting on others"
                 case .done: return "Done"
                 case .archived: return "Archived"
                 }
@@ -258,7 +276,7 @@ struct TodosScrollView: View {
             switch mode {
             case .channel: return a.localizedStandardCompare(b) == .orderedAscending
             case .status:
-                let order = ["In progress": 0, "Open": 1, "Done": 2]
+                let order = ["In progress": 0, "Open": 1, "Waiting on others": 2, "Done": 3]
                 return (order[a] ?? 99) < (order[b] ?? 99)
             case .createdDate, .updatedDate:
                 return DateBucket.sortKey(for: a) < DateBucket.sortKey(for: b)
@@ -266,6 +284,15 @@ struct TodosScrollView: View {
             }
         }
         return sectionKeys.map { GroupedSection(title: $0, todos: buckets[$0] ?? []) }
+    }
+
+    /// Stale items split by who owes the next move: yours (open/in-progress)
+    /// versus parked on someone else (waiting).
+    private var staleGroups: [GroupedSection] {
+        [
+            GroupedSection(title: "Waiting on you", todos: visible.filter(\.isOpen)),
+            GroupedSection(title: "Waiting on others", todos: visible.filter(\.isWaiting)),
+        ].filter { !$0.todos.isEmpty }
     }
 
     private var emptyState: some View {
@@ -404,6 +431,8 @@ struct ReviewRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.primary.opacity(hovering ? 0.06 : 0.03))
         )
+        .contentShape(Rectangle())
+        .onTapGesture { state.openDetail(todo) }
         .onHover { hovering = $0 }
         .animation(.easeInOut(duration: 0.12), value: hovering)
     }
@@ -424,17 +453,24 @@ struct SnoozedScrollView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                let snoozed = openTodos.filter(\.isSnoozed)
-                if snoozed.isEmpty {
+            VStack(alignment: .leading, spacing: 18) {
+                // Parked on someone else (status), vs deliberately snoozed by the
+                // user (overlay). Stale waiting items move to the Stale tab.
+                let waiting = openTodos.filter { $0.isWaiting && !$0.isStale }
+                    .sorted { $0.lastSlackActivity > $1.lastSlackActivity }
+                let snoozedByYou = openTodos.filter(\.isSnoozed)
+                    .sorted { $0.lastSlackActivity > $1.lastSlackActivity }
+                if waiting.isEmpty && snoozedByYou.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Nothing snoozed.")
+                        Text("Nothing parked.")
                             .font(.system(.title3, design: .serif).italic())
-                        Text("Right-click a todo → Snooze to park it until a reply or a date.")
+                        Text("Items waiting on someone else land here, as do todos you snooze (right-click → Snooze).")
                             .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
-                    ForEach(snoozed) { IssueRow(todo: $0) }
+                    section("Waiting on others", waiting)
+                    section("Snoozed by you", snoozedByYou)
                 }
             }
             .padding(.horizontal, 16)
@@ -443,6 +479,20 @@ struct SnoozedScrollView: View {
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func section(_ title: String, _ todos: [Todo]) -> some View {
+        if !todos.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary).textCase(.uppercase)
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(todos) { IssueRow(todo: $0) }
+                }
+            }
+        }
     }
 }
 
@@ -752,10 +802,10 @@ struct HeaderTabs: View {
         switch tab {
         case .review: return all.filter(\.needsReview).count
         case .todos: return all.filter { $0.isOpen && !$0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
-        case .stale: return all.filter { $0.isOpen && $0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
+        case .stale: return all.filter { $0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
         case .completed: return all.filter { $0.statusEnum == .done }.count
         case .archived: return all.filter { $0.statusEnum == .archived }.count
-        case .snoozed: return all.filter { $0.isSnoozed && !$0.pendingReview }.count
+        case .snoozed: return all.filter { ($0.isSnoozed || ($0.isWaiting && !$0.isStale)) && !$0.pendingReview }.count
         case .activity: return 0
         }
     }
@@ -913,6 +963,12 @@ struct IssueRow: View {
                 state.markDone(todo); dismiss()
             }
 
+            if todo.isStale {
+                SiftMenuItem(title: "Revive", systemImage: "arrow.up.circle") {
+                    state.reviveFromStale(todo); dismiss()
+                }
+            }
+
             if todo.isSnoozed {
                 SiftMenuItem(title: "Wake now", systemImage: "bell") {
                     state.unsnooze(todo); dismiss()
@@ -1016,6 +1072,7 @@ struct IssueRow: View {
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let label = todo.snoozeLabel { SnoozeBadge(label: label) }
+                if todo.isWaiting { WaitingBadge() }
                 if let due = todo.dueDate, todo.isOpen, !todo.isSnoozed { DueBadge(date: due) }
                 if todo.isInProgress && !todo.isSnoozed { InProgressBadge() }
                 if todo.isStale { StaleBadge() }
@@ -1132,6 +1189,26 @@ struct StaleBadge: View {
         .frame(height: 16)
         .background(Capsule().solidTint(Color.orange.opacity(0.16)))
         .help("No activity for over \(Int(Todo.staleAfterDays)) days — will archive at \(Int(Todo.archiveAfterDays))")
+    }
+}
+
+struct WaitingBadge: View {
+    static let adaptiveBlue = Color(NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .vibrantDark]) != nil
+            ? NSColor(red: 0.45, green: 0.66, blue: 0.95, alpha: 1)
+            : NSColor(red: 0.20, green: 0.40, blue: 0.72, alpha: 1)
+    })
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "hourglass").font(.system(size: 8, weight: .semibold))
+            Text("Waiting").font(.system(size: 10, weight: .medium))
+        }
+        .foregroundStyle(Self.adaptiveBlue)
+        .padding(.horizontal, 5)
+        .frame(height: 16)
+        .background(Capsule().solidTint(Self.adaptiveBlue.opacity(0.16)))
+        .help("Waiting on someone else's reply")
     }
 }
 

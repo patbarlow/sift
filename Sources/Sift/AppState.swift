@@ -321,6 +321,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Pull a stale item back into its active list by resetting the staleness
+    /// clock — it keeps its status (open → Todos, waiting → Snoozed). Unlike
+    /// `unsnooze`, it leaves snooze fields and `autoSnoozeOptOut` untouched.
+    func reviveFromStale(_ todo: Todo) {
+        applySnooze(todo, activity: .woke) { t in
+            t.lastActivityAt = Date()
+        }
+    }
+
     /// Accept a review suggestion: promote a "for you" todo, perform a
     /// suggested merge, or mark a "maybe done" item done.
     func acceptReview(_ todo: Todo) {
