@@ -446,7 +446,6 @@ struct TodoDetailSheet: View {
     let onClose: () -> Void
     @StateObject private var loader: ThreadLoader
     @EnvironmentObject var settings: AppSettings
-    @EnvironmentObject var state: AppState
     @State private var contentHeight: CGFloat = 0
     @State private var selectedSource = 0
 
@@ -561,7 +560,6 @@ struct TodoDetailSheet: View {
     private var scrollBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                reviewBanner
                 if !todo.summary.isEmpty {
                     Text(todo.displaySummary.redacting(settings.redactionEnabled))
                         .font(.system(size: 13))
@@ -581,56 +579,6 @@ struct TodoDetailSheet: View {
         }
         .frame(height: min(max(contentHeight, 1), Self.maxBodyHeight))
         .onPreferenceChange(ThreadHeightKey.self) { contentHeight = $0 }
-    }
-
-    /// Shown when this todo is awaiting the user's review — the same accept /
-    /// decline decision as the Review tab, but with the full thread in view.
-    @ViewBuilder
-    private var reviewBanner: some View {
-        if todo.needsReview, let kind = todo.reviewKindEnum {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    Image(systemName: "questionmark.circle.fill")
-                        .foregroundStyle(WaitingBadge.adaptiveBlue)
-                    Text(kind.sectionTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer(minLength: 6)
-                    Text("\(Int(todo.reviewConfidence * 100))% confident")
-                        .font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-                if let reason = todo.reviewReason, !reason.isEmpty {
-                    Text(reason.redacting(settings.redactionEnabled))
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 8) {
-                    SiftButton(reviewLabels(kind).accept, leading: "checkmark", variant: .primary) {
-                        state.acceptReview(todo); onClose()
-                    }
-                    SiftButton(reviewLabels(kind).decline, leading: "xmark", variant: .secondary) {
-                        state.declineReview(todo); onClose()
-                    }
-                }
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(WaitingBadge.adaptiveBlue.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(WaitingBadge.adaptiveBlue.opacity(0.25), lineWidth: 1)
-                    )
-            )
-        }
-    }
-
-    private func reviewLabels(_ kind: ReviewKind) -> (accept: String, decline: String) {
-        switch kind {
-        case .forYou: return ("Keep as todo", "Not for me")
-        case .merge: return ("Merge", "Keep separate")
-        case .done: return ("Mark done", "Keep open")
-        }
     }
 
     private var granolaNote: some View {

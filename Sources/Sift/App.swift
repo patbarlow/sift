@@ -142,7 +142,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "t": tab = .todos
             case "z": tab = .snoozed
             case "s": tab = .stale
-            case "r": tab = .review
             case "c": tab = .completed
             case "a": tab = .archived
             case "v": tab = .activity
@@ -358,11 +357,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatusItem() {
         guard let button = statusItem.button else { return }
         let ctx = ModelContext(container)
-        // Match the Todos tab: open todos only — exclude stale, snoozed, and
-        // anything pending review (and done/archived are already not open).
+        // Match the Todos tab: open todos only — exclude stale and snoozed
+        // (done/archived/waiting are already not isOpen).
         let p = #Predicate<Todo> { $0.status != "done" && $0.status != "archived" && $0.classification == "todo" }
         let open = (try? ctx.fetch(FetchDescriptor<Todo>(predicate: p))) ?? []
-        let count = open.filter { $0.isOpen && !$0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
+        let count = open.filter { $0.isOpen && !$0.isStale && !$0.isSnoozed }.count
         button.title = count > 0 ? " \(count)" : ""
         // While syncing, the blink animation owns the image — don't fight it.
         guard syncAnimTimer == nil else { return }

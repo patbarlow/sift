@@ -79,7 +79,6 @@ extension AppSettings {
 /// link multiple Slack threads and/or a Granola meeting), so the list is
 /// organised by lifecycle stage rather than by source.
 enum MainTab: String, CaseIterable, Identifiable {
-    case review = "Review"
     case todos = "Todos"
     case stale = "Stale"
     case completed = "Completed"
@@ -126,8 +125,6 @@ struct MenuBarContent: View {
             ArchiveScrollView(archived: true)
         case .snoozed:
             SnoozedScrollView()
-        case .review:
-            ReviewScrollView()
         case .activity:
             ActivityScrollView()
         }
@@ -189,7 +186,7 @@ struct TodosScrollView: View {
         // Stale tab shows the quiet-but-active items (including parked ones);
         // Todos shows the live, ball-in-your-court rest. Waiting items live in
         // the Snoozed tab until they go stale.
-        let active = openTodos.filter { !$0.isSnoozed && !$0.pendingReview }
+        let active = openTodos.filter { !$0.isSnoozed }
         let base = tab == .stale ? active.filter(\.isStale)
                                  : active.filter { !$0.isStale && !$0.isWaiting }
         // High-priority first; recency breaks ties (the fetch is date-sorted,
@@ -313,129 +310,6 @@ struct TodosScrollView: View {
         }
     }
 
-}
-
-// MARK: - Archive (completed todos)
-
-/// Suggestions the app isn't confident enough to apply on its own — grouped
-/// by type, each accepted or declined inline.
-struct ReviewScrollView: View {
-    @EnvironmentObject var state: AppState
-    @Query private var all: [Todo]
-
-    private var byKind: [(ReviewKind, [Todo])] {
-        let flagged = all.filter(\.needsReview)
-        return [ReviewKind.forYou, .merge, .done].compactMap { kind in
-            let items = flagged.filter { $0.reviewKindEnum == kind }
-                .sorted { $0.reviewConfidence > $1.reviewConfidence }
-            return items.isEmpty ? nil : (kind, items)
-        }
-    }
-
-    private func primaryTitle(for todo: Todo) -> String? {
-        guard let key = todo.reviewMergeIntoKey else { return nil }
-        return all.first { $0.threadKey == key }?.title
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if byKind.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Nothing to review.")
-                            .font(.system(.title3, design: .serif).italic())
-                        Text("When Sift is unsure whether something's yours, a duplicate, or done, it'll ask you here.")
-                            .font(.callout).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } else {
-                    ForEach(byKind, id: \.0) { kind, items in
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text(kind.sectionTitle)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary).textCase(.uppercase)
-                            VStack(alignment: .leading, spacing: 10) {
-                                ForEach(items) { todo in
-                                    ReviewRow(todo: todo, mergeInto: primaryTitle(for: todo))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-            .padding(.bottom, 22)
-        }
-        .scrollIndicators(.hidden)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct ReviewRow: View {
-    let todo: Todo
-    let mergeInto: String?
-    @EnvironmentObject var state: AppState
-    @EnvironmentObject var settings: AppSettings
-    @State private var hovering = false
-
-    private var icon: String {
-        switch todo.reviewKindEnum {
-        case .forYou: return "person.crop.circle.badge.questionmark"
-        case .merge: return "arrow.triangle.merge"
-        case .done: return "checkmark.circle"
-        case .none: return "questionmark"
-        }
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(todo.title.redacting(settings.redactionEnabled))
-                    .font(settings.titleFont())
-                    .fixedSize(horizontal: false, vertical: true)
-                if let mergeInto, todo.reviewKindEnum == .merge {
-                    Text("Merge into “\(mergeInto.redacting(settings.redactionEnabled))”")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                if let reason = todo.reviewReason, !reason.isEmpty {
-                    Text(reason.redacting(settings.redactionEnabled))
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text("\(Int(todo.reviewConfidence * 100))% confident")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
-            Spacer(minLength: 6)
-            HStack(spacing: 4) {
-                SiftButton(variant: .secondary, iconOnly: true) { state.acceptReview(todo) } content: {
-                    LucideIcon(sf: "checkmark", size: 13)
-                        .foregroundStyle(InProgressBadge.adaptiveGreen)
-                }
-                .help("Accept")
-                SiftButton(variant: .secondary, iconOnly: true) { state.declineReview(todo) } content: {
-                    LucideIcon(sf: "xmark", size: 13)
-                        .foregroundStyle(.secondary)
-                }
-                .help("Decline")
-            }
-            .opacity(hovering ? 1 : 0)
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.primary.opacity(hovering ? 0.06 : 0.03))
-        )
-        .contentShape(Rectangle())
-        .onTapGesture { state.openDetail(todo) }
-        .onHover { hovering = $0 }
-        .animation(.easeInOut(duration: 0.12), value: hovering)
-    }
 }
 
 /// Parked (snoozed) todos, waiting on a reply or a date.
@@ -673,6 +547,7 @@ struct ArchivedRow: View {
                     .font(settings.titleFont())
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
+                if todo.autoCompleted { AutoCompletedBadge() }
                 Spacer(minLength: 0)
                 if let c = todo.completedAt {
                     Text(relative(c))
@@ -767,14 +642,12 @@ struct HeaderTabs: View {
     @EnvironmentObject var state: AppState
     @Query private var all: [Todo]
 
-    private static let primary: [MainTab] = [.todos, .snoozed, .stale]
+    private static let primary: [MainTab] = [.todos, .snoozed, .stale, .completed]
     // These live in the menu, but surface as a tab while you're on them.
-    private static let browse: [MainTab] = [.completed, .archived, .activity]
+    private static let browse: [MainTab] = [.archived, .activity]
 
     private var tabs: [MainTab] {
-        var t: [MainTab] = []
-        if count(.review) > 0 || state.mainTab == .review { t.append(.review) }
-        t += Self.primary
+        var t: [MainTab] = Self.primary
         if Self.browse.contains(state.mainTab) { t.append(state.mainTab) }
         return t
     }
@@ -800,12 +673,11 @@ struct HeaderTabs: View {
 
     private func count(_ tab: MainTab) -> Int {
         switch tab {
-        case .review: return all.filter(\.needsReview).count
-        case .todos: return all.filter { $0.isOpen && !$0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
-        case .stale: return all.filter { $0.isStale && !$0.isSnoozed && !$0.pendingReview }.count
+        case .todos: return all.filter { $0.isOpen && !$0.isStale && !$0.isSnoozed }.count
+        case .stale: return all.filter { $0.isStale && !$0.isSnoozed }.count
         case .completed: return all.filter { $0.statusEnum == .done }.count
         case .archived: return all.filter { $0.statusEnum == .archived }.count
-        case .snoozed: return all.filter { ($0.isSnoozed || ($0.isWaiting && !$0.isStale)) && !$0.pendingReview }.count
+        case .snoozed: return all.filter { $0.isSnoozed || ($0.isWaiting && !$0.isStale) }.count
         case .activity: return 0
         }
     }
@@ -1189,6 +1061,20 @@ struct StaleBadge: View {
         .frame(height: 16)
         .background(Capsule().solidTint(Color.orange.opacity(0.16)))
         .help("No activity for over \(Int(Todo.staleAfterDays)) days — will archive at \(Int(Todo.archiveAfterDays))")
+    }
+}
+
+struct AutoCompletedBadge: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "sparkles").font(.system(size: 8, weight: .semibold))
+            Text("Auto-completed").font(.system(size: 10, weight: .medium))
+        }
+        .foregroundStyle(InProgressBadge.adaptiveGreen)
+        .padding(.horizontal, 5)
+        .frame(height: 16)
+        .background(Capsule().solidTint(InProgressBadge.adaptiveGreen.opacity(0.16)))
+        .help("Closed automatically by sync, not by you")
     }
 }
 

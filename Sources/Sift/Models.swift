@@ -80,6 +80,9 @@ final class Todo {
     // Set when the user manually wakes an auto-snoozed (waiting-on-others) todo,
     // so the assessor won't keep re-parking it.
     var autoSnoozeOptOut: Bool = false
+    // True when the sync closed/archived this itself (vs. the user marking it
+    // done) — drives the "Auto-completed" pill in the Completed list.
+    var autoCompleted: Bool = false
     // Deadline extracted from the thread ("I'll do it tomorrow", "by Friday").
     // Once this day arrives, the todo is treated as high priority.
     var dueDate: Date?

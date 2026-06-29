@@ -231,6 +231,7 @@ final class AppState: ObservableObject {
                 t.completedAt = Date()
                 t.updatedAt = Date()
                 t.completionReason = "Manually marked as done"
+                t.autoCompleted = false
                 Activity.log(.manualDone, t.title, ctx: ctx)
                 try? ctx.save()
             }
@@ -328,104 +329,6 @@ final class AppState: ObservableObject {
         applySnooze(todo, activity: .woke) { t in
             t.lastActivityAt = Date()
         }
-    }
-
-    /// Accept a review suggestion: promote a "for you" todo, perform a
-    /// suggested merge, or mark a "maybe done" item done.
-    func acceptReview(_ todo: Todo) {
-        let id = todo.persistentModelID
-        let kind = todo.reviewKindEnum
-        let mergeKey = todo.reviewMergeIntoKey
-        Task { @MainActor in
-            let ctx = ModelContext(container)
-            guard let t = ctx.model(for: id) as? Todo else { return }
-            let title = t.title
-            switch kind {
-            case .forYou:
-                t.pendingReview = false
-                clearReview(t)
-                Activity.log(.accepted, title, detail: "kept as todo", ctx: ctx)
-            case .done:
-                t.status = TodoStatus.done.rawValue
-                t.completedAt = Date()
-                t.completionReason = t.reviewReason ?? "Marked done from review"
-                clearReview(t)
-                Activity.log(.manualDone, title, detail: "from review", ctx: ctx)
-            case .merge:
-                if let key = mergeKey, let primary = todoByKey(key, ctx: ctx) {
-                    fold(t, into: primary, ctx: ctx)
-                    Activity.log(.merged, primary.title, detail: "from review", ctx: ctx)
-                } else {
-                    clearReview(t)   // primary vanished; just keep the todo
-                }
-            case .none:
-                break
-            }
-            try? ctx.save()
-        }
-    }
-
-    /// Decline a review suggestion: drop a "for you" item (and never re-suggest
-    /// that thread), keep a "maybe done" item open, or keep a "merge" separate.
-    func declineReview(_ todo: Todo) {
-        let id = todo.persistentModelID
-        let kind = todo.reviewKindEnum
-        let key = todo.threadKey
-        Task { @MainActor in
-            let ctx = ModelContext(container)
-            guard let t = ctx.model(for: id) as? Todo else { return }
-            let title = t.title
-            switch kind {
-            case .forYou:
-                if ((try? ctx.fetch(FetchDescriptor<IgnoredThread>(
-                    predicate: #Predicate { $0.threadKey == key }))) ?? []).isEmpty {
-                    ctx.insert(IgnoredThread(threadKey: key))
-                }
-                ctx.delete(t)
-                Activity.log(.declined, title, detail: "not for you", ctx: ctx)
-            case .done:
-                t.reviewDismissedAt = Date()
-                clearReview(t)
-                Activity.log(.declined, title, detail: "kept open", ctx: ctx)
-            case .merge:
-                t.excludeFromAutoMerge = true
-                clearReview(t)
-                Activity.log(.declined, title, detail: "kept separate", ctx: ctx)
-            case .none:
-                break
-            }
-            try? ctx.save()
-        }
-    }
-
-    private func clearReview(_ t: Todo) {
-        t.reviewKind = nil
-        t.reviewReason = nil
-        t.reviewConfidence = 0
-        t.reviewMergeIntoKey = nil
-        t.updatedAt = Date()
-    }
-
-    private func todoByKey(_ key: String, ctx: ModelContext) -> Todo? {
-        try? ctx.fetch(FetchDescriptor<Todo>(predicate: #Predicate { $0.threadKey == key })).first
-    }
-
-    /// Fold one todo into another as a merged source (mirrors consolidation).
-    private func fold(_ todo: Todo, into primary: Todo, ctx: ModelContext) {
-        let source = TodoSource(
-            title: todo.title, summary: todo.summary, classification: todo.classification,
-            status: todo.status, channelID: todo.channelID, channelName: todo.channelName,
-            threadKey: todo.threadKey, sourceURL: todo.sourceURL,
-            lastActivity: todo.lastSlackActivity, lastSeenTs: todo.lastSeenTs
-        )
-        source.todo = primary
-        ctx.insert(source)
-        for s in todo.extraSources { s.todo = primary }
-        for c in todo.comments { c.todo = primary }
-        ctx.delete(todo)
-        if todo.priorityEnum < primary.priorityEnum { primary.priority = todo.priority }
-        primary.updatedAt = Date()
-        primary.lastActivityAt = Date()
     }
 
     /// Permanently removes a todo from the database (along with its comments).

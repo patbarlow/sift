@@ -80,6 +80,7 @@ final class SyncWorker {
         var report = Report()
         let ctx = ModelContext(container)
         loadMemoryContext(ctx: ctx)
+        backfillAutoCompleted(ctx: ctx)
 
         do {
             try await scanMentions(ctx: ctx, report: &report)
@@ -303,12 +304,13 @@ final class SyncWorker {
     private func archiveStaleTodos(ctx: ModelContext, report: inout Report) {
         let all = (try? ctx.fetch(FetchDescriptor<Todo>())) ?? []
         let now = Date()
-        for todo in all where todo.isActive && !todo.pendingReview {
+        for todo in all where todo.isActive {
             let inactiveDays = now.timeIntervalSince(todo.activityClock) / 86400
             guard inactiveDays >= Todo.archiveAfterDays else { continue }
             todo.status = TodoStatus.archived.rawValue
             todo.completedAt = now
             todo.completionReason = "Archived — no activity for \(Int(Todo.archiveAfterDays)) days"
+            todo.autoCompleted = true
             todo.updatedAt = now
             report.archived += 1; Activity.log(.archived, todo.title, ctx: ctx)
         }
@@ -356,7 +358,7 @@ final class SyncWorker {
             let parentTs = match.threadParentTs
             let threadKey = "\(match.channel.id):\(parentTs)"
             if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
-            if routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
+            if await routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
 
             do {
                 let resolved = await resolveChannelName(
@@ -372,7 +374,7 @@ final class SyncWorker {
                     ctx: ctx
                 ) else { continue }
                 if outcome.mergedInto == nil {
-                    ctx.insert(outcome.todo); Activity.log(outcome.todo.pendingReview ? .review : .created, outcome.todo.title, ctx: ctx)
+                    ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
                     if isDM { seenDMChannels.insert(match.channel.id) }
                     report.newMentions += 1
                     if outcome.todo.statusEnum == .inProgress {
@@ -418,7 +420,7 @@ final class SyncWorker {
 
                 let threadKey = "\(channel.channelID):\(msg.ts)"
                 if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
-                if routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
+                if await routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
 
                 do {
                     guard let outcome = try await ingestCandidate(
@@ -430,7 +432,7 @@ final class SyncWorker {
                         ctx: ctx
                     ) else { continue }
                     if outcome.mergedInto == nil {
-                        ctx.insert(outcome.todo); Activity.log(outcome.todo.pendingReview ? .review : .created, outcome.todo.title, ctx: ctx)
+                        ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
                         report.newFromWatchedChannels += 1
                         if outcome.todo.statusEnum == .inProgress {
                             report.movedInProgress += 1
@@ -489,7 +491,7 @@ final class SyncWorker {
 
             let threadKey = "\(dm.id):\(firstAsk.ts)"
             if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
-            if routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
+            if await routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
             do {
                 let resolved = await resolveChannelName(channelID: dm.id, fallback: nil)
                 guard let outcome = try await ingestCandidate(
@@ -501,7 +503,7 @@ final class SyncWorker {
                     ctx: ctx
                 ) else { continue }
                 if outcome.mergedInto == nil {
-                    ctx.insert(outcome.todo); Activity.log(outcome.todo.pendingReview ? .review : .created, outcome.todo.title, ctx: ctx)
+                    ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
                     report.newFromDMs += 1
                     if outcome.todo.statusEnum == .inProgress {
                         report.movedInProgress += 1
@@ -554,8 +556,10 @@ final class SyncWorker {
         case .skip, .done:
             return nil
         case .open, .inProgress, .waiting:
-            // Too unsure it's the user's → don't even surface it.
-            if assessment.forYouConfidence < 0.45 { return nil }
+            // Single confidence bar — no review queue. Below the bar we don't
+            // surface it at all; at or above, it becomes a real todo (and
+            // auto-close cleans it up later if it turns out not to be yours).
+            if assessment.forYouConfidence < Self.createBar { return nil }
             let summary = try await summariseThread(
                 replies: resolved,
                 channelName: channelName,
@@ -594,15 +598,6 @@ final class SyncWorker {
             todo.dueDate = assessment.due
             todo.customer = await deriveCustomer(channelName: channelName, replies: resolved)
             todo.participantsNote = await participantsNote(resolved)
-            // Middling confidence it's yours → hold it in the review queue
-            // rather than dropping it straight into the list.
-            if assessment.forYouConfidence < 0.75 {
-                todo.pendingReview = true
-                todo.reviewKind = ReviewKind.forYou.rawValue
-                todo.reviewConfidence = assessment.forYouConfidence
-                todo.reviewReason = assessment.forYouReason ?? assessment.note
-                    ?? "Not sure this is yours to action."
-            }
             // Waiting on someone else is now a first-class status (parked but
             // visible in Snoozed → "Waiting on others"), not an auto-snooze.
             if storedStatus == .waiting {
@@ -613,6 +608,12 @@ final class SyncWorker {
     }
 
     // MARK: - Consolidation
+
+    /// Minimum "is this yours?" confidence to create a todo at all. There's no
+    /// review queue; below this we skip it (re-ingested later if it gains
+    /// signal), at or above it becomes a real todo. Favours recall — borderline
+    /// items that don't pan out get cleaned by auto-close.
+    static let createBar = 0.6
 
     /// Largest group the clustering pass will merge in one go. A genuine work
     /// item rarely spans more than 2–3 threads; a bigger group almost always
@@ -696,7 +697,7 @@ final class SyncWorker {
     /// reports merges, and is reversible (see unmerge in the UI).
     private func consolidateOpenTodos(ctx: ModelContext, report: inout Report) async {
         let open = ((try? ctx.fetch(FetchDescriptor<Todo>())) ?? [])
-            .filter { $0.isOpen && !$0.excludeFromAutoMerge && !$0.isSnoozed && !$0.pendingReview }
+            .filter { $0.isOpen && !$0.excludeFromAutoMerge && !$0.isSnoozed }
         guard open.count >= 2 else { return }
 
         let listing = open.enumerated().map { i, t in
@@ -755,7 +756,10 @@ final class SyncWorker {
             }
             let mergeConfidence = (verdict["confidence"] as? Double)
                 ?? (verdict["confidence"] as? NSNumber)?.doubleValue ?? 0
-            if mergeConfidence < 0.6 { continue }   // not the same work
+            // Only auto-merge when confident it's the same work. No review queue:
+            // borderline stays separate — the safer default, since over-merging
+            // (gluing distinct work under one title) is the worse failure.
+            if mergeConfidence < 0.9 { continue }
 
             // Prefer an already-established work item (one that has absorbed
             // sources) as the anchor, then the earliest-created. This keeps the
@@ -767,19 +771,10 @@ final class SyncWorker {
                 return $0.createdAt < $1.createdAt
             }.first!
 
-            // Middling confidence → suggest the merge for review instead of
-            // doing it. Flag each other member pointing at the primary.
-            if mergeConfidence < 0.9 {
-                let reason = (verdict["reason"] as? String) ?? "Looks like the same work as \"\(primary.title)\"."
-                for todo in members where todo !== primary
-                    && todo.reviewKindEnum == nil && !todo.excludeFromAutoMerge {
-                    todo.reviewKind = ReviewKind.merge.rawValue; Activity.log(.review, todo.title, detail: "possible duplicate", ctx: ctx)
-                    todo.reviewMergeIntoKey = primary.threadKey
-                    todo.reviewConfidence = mergeConfidence
-                    todo.reviewReason = reason
-                }
-                continue
-            }
+            // Don't let a primary keep absorbing across runs — a real work item
+            // spans a handful of threads, not 18. Once it's at the cap, leave the
+            // rest separate rather than growing a mega-bundle.
+            guard primary.extraSources.count < Self.maxMergeGroupSize else { continue }
 
             for todo in members where todo !== primary {
                 let source = TodoSource(
@@ -1159,7 +1154,7 @@ final class SyncWorker {
 
             // If a todo already exists, refresh pass will handle it.
             if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
-            if routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
+            if await routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
 
             do {
                 let resolved = await resolveChannelName(
@@ -1175,7 +1170,7 @@ final class SyncWorker {
                     ctx: ctx
                 ) else { continue }
                 if outcome.mergedInto == nil {
-                    ctx.insert(outcome.todo); Activity.log(outcome.todo.pendingReview ? .review : .created, outcome.todo.title, ctx: ctx)
+                    ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
                     if isDM { seenDMChannels.insert(match.channel.id) }
                     report.newMentions += 1
                     if outcome.todo.statusEnum == .inProgress {
@@ -1210,10 +1205,6 @@ final class SyncWorker {
         }
 
         for todo in open {
-            // Pending-review "for you" suggestions stay static until the user
-            // accepts or declines them.
-            if todo.pendingReview { continue }
-
             // Snoozed: parked until a wake condition. Don't assess until then.
             if todo.isSnoozed {
                 if await wakeSnoozed(todo) {
@@ -1301,6 +1292,7 @@ final class SyncWorker {
                     let reason = assessment.note?.isEmpty == false
                         ? assessment.note! : "Closed — not an action for you"
                     todo.completionReason = reason
+                    todo.autoCompleted = true
                     ctx.insert(TodoComment(todo: todo, body: reason, isAutoTriage: true))
                     report.autoClosed += 1; Activity.log(.autoDone, todo.title, ctx: ctx)
                 }
@@ -1309,22 +1301,16 @@ final class SyncWorker {
                 if !wasDone {
                     let reason = assessment.note?.isEmpty == false
                         ? assessment.note! : "Auto-resolved by sync"
-                    // Confident it's resolved → close. Unsure → surface in
-                    // Review instead of silently closing (unless recently
-                    // declined). Too unsure → leave it alone.
-                    let recentlyDeclined = todo.reviewDismissedAt.map {
-                        Date().timeIntervalSince($0) < 7 * 86400
-                    } ?? false
-                    if assessment.doneConfidence >= 0.75 || recentlyDeclined {
+                    // Confident it's resolved → close. Otherwise leave it open
+                    // (no review queue) — it'll close when it's confidently done
+                    // or age out via the stale sweep.
+                    if assessment.doneConfidence >= 0.75 {
                         todo.status = TodoStatus.done.rawValue
                         todo.completedAt = Date()
                         todo.completionReason = reason
+                        todo.autoCompleted = true
                         ctx.insert(TodoComment(todo: todo, body: reason, isAutoTriage: true))
                         report.autoClosed += 1; Activity.log(.autoDone, todo.title, ctx: ctx)
-                    } else if assessment.doneConfidence >= 0.45, todo.reviewKindEnum != .done {
-                        todo.reviewKind = ReviewKind.done.rawValue; Activity.log(.review, todo.title, detail: "might be done", ctx: ctx)
-                        todo.reviewConfidence = assessment.doneConfidence
-                        todo.reviewReason = reason
                     }
                 }
                 todo.updatedAt = Date()
@@ -2387,29 +2373,54 @@ final class SyncWorker {
     }
 
     /// If this thread was previously merged into a work item, route the new
-    /// activity to that work item instead of spawning a duplicate todo:
-    /// refresh its activity clock and reopen it if it had been closed.
-    /// Returns true if the thread belonged to a merged source (handled).
-    private func routeToMergedWorkItem(threadKey: String, ctx: ModelContext, report: inout Report) -> Bool {
+    /// activity to that work item instead of spawning a duplicate todo: refresh
+    /// its activity clock, and — if it had been closed — reopen it ONLY when a
+    /// re-read says it's genuinely actionable again (a recurrence), not on stray
+    /// chatter. Returns true if the thread belonged to a merged source.
+    private func routeToMergedWorkItem(threadKey: String, ctx: ModelContext, report: inout Report) async -> Bool {
         let pred = #Predicate<TodoSource> { $0.threadKey == threadKey }
         guard let source = try? ctx.fetch(FetchDescriptor<TodoSource>(predicate: pred)).first,
               let parent = source.todo else { return false }
-        let now = Date()
-        source.lastActivity = now
-        parent.lastActivityAt = now
-        parent.updatedAt = now
-        if parent.statusEnum == .done || parent.statusEnum == .archived {
-            parent.status = TodoStatus.open.rawValue
-            parent.completedAt = nil
-            parent.completionReason = nil
-            ctx.insert(TodoComment(
-                todo: parent,
-                body: "Reopened — new activity in merged thread (\(source.sourceLabel))",
-                isAutoTriage: true
-            ))
-            report.refreshed += 1
+        source.lastActivity = Date()
+        let parts = threadKey.split(separator: ":", maxSplits: 1).map(String.init)
+        if (parent.statusEnum == .done || parent.statusEnum == .archived),
+           parts.count == 2, !threadKey.hasPrefix("granola:") {
+            await reopenIfRecurring(parent, channelID: parts[0], parentTs: parts[1],
+                                    channelName: source.channelName, ctx: ctx, report: &report)
+        } else {
+            parent.lastActivityAt = Date()
+            parent.updatedAt = Date()
         }
         return true
+    }
+
+    /// Re-read a resolved todo's thread and reopen it only if the latest state
+    /// is genuinely actionable again. Stray chatter on a closed item leaves it
+    /// closed; a real recurrence brings it back. Always refreshes the activity
+    /// clock since the thread did move.
+    private func reopenIfRecurring(_ todo: Todo, channelID: String, parentTs: String,
+                                   channelName: String, ctx: ModelContext, report: inout Report) async {
+        todo.lastActivityAt = Date()
+        todo.updatedAt = Date()
+        guard let replies = try? await fetchThread(channelID: channelID, parentTs: parentTs) else { return }
+        let resolved = await resolveAllUserMentions(in: replies)
+        guard let a = try? await assessThread(replies: resolved, channelName: channelName,
+                                              existingTitle: todo.title) else { return }
+        switch a.status {
+        case .open, .inProgress, .waiting:
+            todo.status = (a.status == .inProgress ? TodoStatus.inProgress
+                           : a.status == .waiting ? .waiting : .open).rawValue
+            todo.completedAt = nil
+            todo.completionReason = nil
+            todo.autoCompleted = false
+            ctx.insert(TodoComment(todo: todo,
+                                   body: a.note ?? "Reopened — recurred after being closed",
+                                   isAutoTriage: true))
+            Activity.log(.reopened, todo.title, ctx: ctx)
+            report.refreshed += 1
+        case .skip, .done:
+            break   // genuinely still resolved — leave it closed
+        }
     }
 
     private func processedMeeting(id: String, ctx: ModelContext) -> Bool {
@@ -2420,6 +2431,20 @@ final class SyncWorker {
     /// One-time-ish migration: derive processed meeting IDs from existing
     /// Granola todos so meetings created before process-once tracking aren't
     /// re-scraped. Idempotent — safe to run every sync.
+    /// One-time: classify historical completions as auto vs. manual so the
+    /// "Auto-completed" pill is right for rows closed before the flag existed.
+    /// Manual closes carry a known reason; everything else was sync-driven.
+    private func backfillAutoCompleted(ctx: ModelContext) {
+        let flag = "autoCompletedBackfilled"
+        guard readCursor(key: flag, ctx: ctx) == nil else { return }
+        let manual: Set<String> = ["Manually marked as done", "Marked done from review"]
+        let all = (try? ctx.fetch(FetchDescriptor<Todo>())) ?? []
+        for t in all where t.statusEnum == .done || t.statusEnum == .archived {
+            t.autoCompleted = !manual.contains(t.completionReason ?? "")
+        }
+        writeCursor(key: flag, value: "1", ctx: ctx)
+    }
+
     private func backfillProcessedGranolaMeetings(ctx: ModelContext) {
         guard let todos = try? ctx.fetch(FetchDescriptor<Todo>()) else { return }
         let prefix = "granola:"
