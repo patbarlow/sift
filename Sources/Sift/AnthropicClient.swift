@@ -15,6 +15,15 @@ actor AnthropicClient: LLMProvider {
         self.smartModel = smartModel
     }
 
+    /// Whether a model accepts sampling params (`temperature` etc.). The 4.5
+    /// generation and earlier do; Claude 4.6+ and the 5 family removed them.
+    /// Unknown models default to `false` — omitting is always safe, sending is
+    /// what 400s.
+    private static func acceptsTemperature(_ model: String) -> Bool {
+        let m = model.lowercased()
+        return m.contains("-4-5") || m.contains("-4-1") || m.contains("claude-3")
+    }
+
     func send(tier: LLMTier,
               system: String,
               userMessage: String,
@@ -23,10 +32,9 @@ actor AnthropicClient: LLMProvider {
         let model = tier == .fast ? fastModel : smartModel
         let maxTok = maxTokens ?? (tier == .fast ? 1024 : 2048)
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "max_tokens": maxTok,
-            "temperature": temperature,
             "system": [
                 [
                     "type": "text",
@@ -41,6 +49,13 @@ actor AnthropicClient: LLMProvider {
                 ]
             ],
         ]
+        // Sampling params were removed on Claude 4.6+ and the 5 family — sending
+        // `temperature` there returns a 400. Only send it to models known to
+        // accept it (the 4.5 generation and earlier); newer/unknown models omit
+        // it and use their default, which never errors.
+        if Self.acceptsTemperature(model) {
+            body["temperature"] = temperature
+        }
 
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
