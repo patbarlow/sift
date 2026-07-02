@@ -23,6 +23,16 @@ protocol LLMProvider: Sendable {
                      maxTokens: Int?,
                      temperature: Double) async throws -> [String: Any]
 
+    /// JSON with an optional response schema. Providers that support structured
+    /// outputs (Anthropic) constrain the response to `schema`; others ignore it
+    /// and fall back to parsing free text.
+    func sendForJSON(tier: LLMTier,
+                     system: String,
+                     userMessage: String,
+                     maxTokens: Int?,
+                     temperature: Double,
+                     schema: [String: Any]?) async throws -> [String: Any]
+
     func extractJSON(from text: String) throws -> [String: Any]
 }
 
@@ -41,6 +51,18 @@ extension LLMProvider {
             temperature: temperature
         )
         return try extractJSON(from: raw)
+    }
+
+    /// Default: providers without structured-output support ignore the schema
+    /// and parse free text (Anthropic overrides this to constrain the response).
+    func sendForJSON(tier: LLMTier,
+                     system: String,
+                     userMessage: String,
+                     maxTokens: Int?,
+                     temperature: Double,
+                     schema: [String: Any]?) async throws -> [String: Any] {
+        try await sendForJSON(tier: tier, system: system, userMessage: userMessage,
+                              maxTokens: maxTokens, temperature: temperature)
     }
 
     /// Extracts a JSON object from model output. Tolerates fenced code blocks
@@ -230,5 +252,10 @@ struct RoutingLLM: LLMProvider {
     func send(tier: LLMTier, system: String, userMessage: String, maxTokens: Int?, temperature: Double) async throws -> String {
         let p = tier == .fast ? fast : smart
         return try await p.send(tier: tier, system: system, userMessage: userMessage, maxTokens: maxTokens, temperature: temperature)
+    }
+
+    func sendForJSON(tier: LLMTier, system: String, userMessage: String, maxTokens: Int?, temperature: Double, schema: [String: Any]?) async throws -> [String: Any] {
+        let p = tier == .fast ? fast : smart
+        return try await p.sendForJSON(tier: tier, system: system, userMessage: userMessage, maxTokens: maxTokens, temperature: temperature, schema: schema)
     }
 }

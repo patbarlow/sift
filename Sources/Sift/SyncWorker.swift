@@ -1994,6 +1994,27 @@ final class SyncWorker {
         memoryContext = blocks.joined(separator: "\n")
     }
 
+    /// Response schema for the assessor. On models that support structured
+    /// outputs this guarantees valid, conforming JSON — no fences, no prose, no
+    /// parse failures. Optional fields are nullable so the model can omit them.
+    private static let assessmentSchema: [String: Any] = [
+        "type": "object",
+        "additionalProperties": false,
+        "properties": [
+            "status": ["type": "string", "enum": ["skip", "open", "in_progress", "waiting", "done"]],
+            "classification": ["type": "string", "enum": ["todo", "update"]],
+            "priority": ["type": "string", "enum": ["high", "normal", "low"]],
+            "priority_reason": ["type": ["string", "null"]],
+            "due": ["type": ["string", "null"]],
+            "for_you_confidence": ["type": "number"],
+            "done_confidence": ["type": ["number", "null"]],
+            "for_you_reason": ["type": ["string", "null"]],
+            "note": ["type": ["string", "null"]],
+        ],
+        "required": ["status", "classification", "priority", "priority_reason",
+                     "due", "for_you_confidence", "done_confidence", "for_you_reason", "note"],
+    ]
+
     private func assessThread(replies: [SlackClient.Message],
                               channelName: String,
                               existingTitle: String?) async throws -> ThreadAssessment {
@@ -2042,7 +2063,8 @@ final class SyncWorker {
             system: systemPrompt(Self.assessSystemBase),
             userMessage: payload,
             maxTokens: 250,
-            temperature: 0.1
+            temperature: 0.1,
+            schema: Self.assessmentSchema
         )
         let status: ThreadAssessment.Status = {
             switch (json["status"] as? String) ?? "open" {
