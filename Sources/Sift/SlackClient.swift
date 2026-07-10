@@ -147,6 +147,50 @@ actor SlackClient {
         return resp.messages ?? []
     }
 
+    /// Threads the user reacted to with `emoji`, resolved to their thread roots
+    /// (so a reaction on a reply maps to the same key as the parent's todo).
+    /// De-duplicated; paginated over recent reactions.
+    func reactedThreads(emoji: String, userID: String, maxPages: Int = 4) async throws -> [(channelID: String, parentTs: String)] {
+        struct Item: Decodable {
+            let type: String
+            let channel: String?
+            let message: Message?
+        }
+        struct Resp: Decodable {
+            let ok: Bool
+            let error: String?
+            let items: [Item]?
+            let response_metadata: Meta?
+            struct Meta: Decodable { let next_cursor: String? }
+        }
+        var out: [(String, String)] = []
+        var seen = Set<String>()
+        var cursor: String? = nil
+        var page = 0
+        while page < maxPages {
+            var params: [URLQueryItem] = [
+                URLQueryItem(name: "full", value: "true"),
+                URLQueryItem(name: "limit", value: "100"),
+            ]
+            if let c = cursor, !c.isEmpty { params.append(URLQueryItem(name: "cursor", value: c)) }
+            let resp: Resp = try await get("reactions.list", params)
+            if !resp.ok { throw SlackError.apiError(resp.error ?? "unknown") }
+            for item in resp.items ?? [] {
+                guard item.type == "message", let channel = item.channel, let m = item.message else { continue }
+                let reacted = (m.reactions ?? []).contains {
+                    $0.name == emoji && ($0.users ?? []).contains(userID)
+                }
+                guard reacted else { continue }
+                let key = "\(channel):\(m.threadParentTs)"
+                if seen.insert(key).inserted { out.append((channel, m.threadParentTs)) }
+            }
+            guard let next = resp.response_metadata?.next_cursor, !next.isEmpty else { break }
+            cursor = next
+            page += 1
+        }
+        return out
+    }
+
     /// Full thread replies for a parent ts.
     func conversationReplies(channelID: String, threadTs: String) async throws -> [Message] {
         let params: [URLQueryItem] = [
