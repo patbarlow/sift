@@ -91,8 +91,10 @@ extension LLMProvider {
             throw LLMError.decode("unbalanced JSON in response: \(text.prefix(200))")
         }
         let blob = String(cleaned[open...close])
+        // try? so malformed JSON surfaces as a clear LLMError.decode rather than
+        // a raw JSONSerialization error ("data … isn't in the correct format").
         guard let data = blob.data(using: .utf8),
-              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw LLMError.decode("could not parse JSON: \(blob.prefix(200))")
         }
         return obj

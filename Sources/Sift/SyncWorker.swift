@@ -2215,6 +2215,16 @@ final class SyncWorker {
     The user's own messages in the thread start with "[ME]".
     """
 
+    private static let summariseSchema: [String: Any] = [
+        "type": "object",
+        "additionalProperties": false,
+        "properties": [
+            "title": ["type": "string"],
+            "summary": ["type": "string"],
+        ],
+        "required": ["title", "summary"],
+    ]
+
     private func summariseThread(replies: [SlackClient.Message],
                                  channelName: String,
                                  classification: TodoClassification,
@@ -2238,7 +2248,8 @@ final class SyncWorker {
             system: systemPrompt(Self.summariseSystemBase),
             userMessage: payload,
             maxTokens: 250,
-            temperature: 0.1
+            temperature: 0.1,
+            schema: Self.summariseSchema
         )
         return SummariseResult(
             title: (json["title"] as? String) ?? "Untitled",
