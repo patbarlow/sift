@@ -576,7 +576,8 @@ final class SyncWorker {
                                  fallbackPermalink: URL?,
                                  flagged: Bool = false,
                                  ctx: ModelContext) async throws -> IngestOutcome? {
-        let replies = try await fetchThread(channelID: channelID, parentTs: parentTs)
+        let dmBound = dmUpperBound(channelID: channelID, afterTs: parentTs, ctx: ctx)
+        let replies = try await fetchThread(channelID: channelID, parentTs: parentTs, upTo: dmBound)
 
         // Slack search often omits thread_ts on reply matches, so the caller's
         // key can point at a reply rather than the thread root — which once
@@ -1304,7 +1305,8 @@ final class SyncWorker {
 
             let replies: [SlackClient.Message]
             do {
-                replies = try await fetchThread(channelID: channelID, parentTs: parentTs)
+                let dmBound = dmUpperBound(channelID: channelID, afterTs: parentTs, ctx: ctx)
+                replies = try await fetchThread(channelID: channelID, parentTs: parentTs, upTo: dmBound)
             } catch {
                 report.errors.append("replies(\(todo.title.prefix(40))): \(error.localizedDescription)")
                 continue
@@ -1659,8 +1661,24 @@ final class SyncWorker {
         return first ?? displayName
     }
 
-    private func fetchThread(channelID: String, parentTs: String) async throws -> [SlackClient.Message] {
-        let cacheKey = "\(channelID):\(parentTs)"
+    /// For a DM todo, the anchor of the NEXT DM todo in the same conversation
+    /// (the smallest message ts strictly after `afterTs`). Used to cap a DM
+    /// todo's thread window so it can't absorb a later, separate ask. Nil for
+    /// non-DM channels or when nothing later exists.
+    private func dmUpperBound(channelID: String, afterTs: String, ctx: ModelContext) -> String? {
+        guard channelID.hasPrefix("D") else { return nil }
+        let all = (try? ctx.fetch(FetchDescriptor<Todo>())) ?? []
+        var bound: String?
+        for t in all where t.channelID == channelID {
+            let ts = t.threadKey.split(separator: ":", maxSplits: 1).map(String.init).last ?? ""
+            guard compareTs(ts, afterTs) > 0 else { continue }
+            if bound == nil || compareTs(ts, bound!) < 0 { bound = ts }
+        }
+        return bound
+    }
+
+    private func fetchThread(channelID: String, parentTs: String, upTo latestTs: String? = nil) async throws -> [SlackClient.Message] {
+        let cacheKey = "\(channelID):\(parentTs):\(latestTs ?? "")"
         if let cached = threadCache[cacheKey] { return cached }
 
         // DMs are flat conversations — replies come as new messages, not thread
@@ -1671,7 +1689,11 @@ final class SyncWorker {
             let oldest = String(format: "%.6f", (Double(parentTs) ?? 0) - 1)
             let history = try await slack.conversationHistory(channelID: channelID, after: oldest)
             // history is newest-first; present oldest-first like a thread.
-            let ordered = history.sorted { compareTs($0.ts, $1.ts) < 0 }
+            var ordered = history.sorted { compareTs($0.ts, $1.ts) < 0 }
+            // Bound the window so an earlier DM todo doesn't swallow a later,
+            // separate ask in the same DM — each DM todo owns messages up to the
+            // next DM todo's anchor.
+            if let latestTs { ordered = ordered.filter { compareTs($0.ts, latestTs) < 0 } }
             threadCache[cacheKey] = ordered
             return ordered
         }
