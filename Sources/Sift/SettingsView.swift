@@ -559,7 +559,7 @@ struct DangerZonePane: View {
                 }
                 if let last = state.lastReport {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\u{2022} \(last.newMentions) from mentions, \(last.newFromWatchedChannels) from watched, \(last.newFromDMs) from DMs, \(last.newFromReactions) from \u{1F440}")
+                        Text("\u{2022} \(last.newMentions) from mentions, \(last.newFromWatchedChannels) from watched, \(last.newFromDMs) from DMs")
                         Text("\u{2022} \(last.refreshed) refreshed \u{00b7} \(last.autoClosed) auto-closed \u{00b7} \(last.movedInProgress) \u{2192} in progress")
                         Text("\u{2022} \(last.mergedSources) merged \u{00b7} \(last.archived) archived")
                         if !last.errors.isEmpty {

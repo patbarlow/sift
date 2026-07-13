@@ -17,7 +17,6 @@ final class SyncWorker {
         var newMentions: Int = 0
         var newFromWatchedChannels: Int = 0
         var newFromDMs: Int = 0
-        var newFromReactions: Int = 0
         var refreshed: Int = 0
         var autoClosed: Int = 0
         var movedInProgress: Int = 0
@@ -88,7 +87,6 @@ final class SyncWorker {
             try await scanWatchedChannels(ctx: ctx, report: &report)
             try await scanDMs(ctx: ctx, report: &report)
             try await scanParticipantThreads(ctx: ctx, report: &report)
-            try await scanReactedItems(ctx: ctx, report: &report)
             if granola != nil {
                 try await scanGranolaMeetings(ctx: ctx, report: &report)
             }
@@ -97,7 +95,7 @@ final class SyncWorker {
             archiveStaleTodos(ctx: ctx, report: &report)
             // Only cluster when this run actually added todos — avoids
             // re-running an expensive LLM pass over an unchanged list.
-            let addedThisRun = report.newMentions + report.newFromWatchedChannels + report.newFromDMs + report.newFromReactions
+            let addedThisRun = report.newMentions + report.newFromWatchedChannels + report.newFromDMs
             if addedThisRun > 0 {
                 await consolidateOpenTodos(ctx: ctx, report: &report)
             }
@@ -395,50 +393,6 @@ final class SyncWorker {
         writeCursor(key: cursorKey, value: latestTs, ctx: ctx)
     }
 
-    // MARK: - Ingest: reacted items (:eyes:)
-
-    /// Messages you reacted to with the trigger emoji become todos — an explicit
-    /// "flag this for me" gesture. Deduped by thread root (so a reaction on a
-    /// reply maps to its thread's todo), and flagged items bypass the confidence
-    /// bar, then follow the normal stale/auto-archive lifecycle.
-    private func scanReactedItems(ctx: ModelContext, report: inout Report) async throws {
-        let me = settings.slackUserID
-        guard !me.isEmpty else { return }
-        let items: [(channelID: String, parentTs: String)]
-        do {
-            items = try await slack.reactedThreads(emoji: Self.reactionTrigger, userID: me)
-        } catch {
-            report.errors.append("reactions: \(error.localizedDescription)")
-            return
-        }
-        for (channelID, parentTs) in items {
-            let threadKey = "\(channelID):\(parentTs)"
-            if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
-            if await routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
-            do {
-                let channelName = await resolveChannelName(channelID: channelID, fallback: channelID)
-                guard let outcome = try await ingestCandidate(
-                    threadKey: threadKey,
-                    channelID: channelID,
-                    channelName: channelName,
-                    parentTs: parentTs,
-                    fallbackPermalink: nil,
-                    flagged: true,
-                    ctx: ctx
-                ) else { continue }
-                if outcome.mergedInto == nil {
-                    ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
-                    report.newFromReactions += 1
-                    if outcome.todo.statusEnum == .inProgress { report.movedInProgress += 1 }
-                }
-            } catch {
-                if !"\(error.localizedDescription)".contains("channel_not_found") {
-                    report.errors.append("ingest reaction: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
     // MARK: - Ingest: watched channels
 
     private func scanWatchedChannels(ctx: ModelContext, report: inout Report) async throws {
@@ -574,7 +528,6 @@ final class SyncWorker {
                                  channelName: String,
                                  parentTs: String,
                                  fallbackPermalink: URL?,
-                                 flagged: Bool = false,
                                  ctx: ModelContext) async throws -> IngestOutcome? {
         let dmBound = dmUpperBound(channelID: channelID, afterTs: parentTs, ctx: ctx)
         let replies = try await fetchThread(channelID: channelID, parentTs: parentTs, upTo: dmBound)
@@ -600,30 +553,14 @@ final class SyncWorker {
             channelName: channelName,
             existingTitle: nil
         )
-        // Decide the status to create with. Normally we drop anything below the
-        // confidence bar and don't track skip/done. Flagged items (you reacted
-        // with the trigger emoji) always become a todo — you explicitly flagged
-        // it — so they bypass the bar, and skip/done fall back to open; the next
-        // refresh re-assesses and the normal lifecycle closes it if it's really
-        // resolved.
-        let effectiveStatus: ThreadAssessment.Status
-        if flagged {
-            switch assessment.status {
-            case .inProgress: effectiveStatus = .inProgress
-            case .waiting: effectiveStatus = .waiting
-            default: effectiveStatus = .open
-            }
-        } else {
-            switch assessment.status {
-            case .skip, .done:
-                return nil
-            case .open, .inProgress, .waiting:
-                // Single confidence bar — no review queue. Below the bar we
-                // don't surface it; at or above it becomes a real todo (and
-                // auto-close cleans it up later if it turns out not to be yours).
-                if assessment.forYouConfidence < Self.createBar { return nil }
-                effectiveStatus = assessment.status
-            }
+        // Single confidence bar — no review queue. Skip/done aren't tracked, and
+        // below the bar we don't surface it; at or above it becomes a real todo
+        // (auto-close cleans it up later if it turns out not to be yours).
+        switch assessment.status {
+        case .skip, .done:
+            return nil
+        case .open, .inProgress, .waiting:
+            if assessment.forYouConfidence < Self.createBar { return nil }
         }
 
         // Note: cross-thread consolidation is intentionally disabled at ingest.
@@ -638,8 +575,8 @@ final class SyncWorker {
         let permalink = (try? await slack.chatPermalink(channelID: channelID, messageTs: rootTs))
             ?? fallbackPermalink
         let lastTs = resolved.last?.ts ?? rootTs
-        let storedStatus: TodoStatus = effectiveStatus == .inProgress ? .inProgress
-            : effectiveStatus == .waiting ? .waiting : .open
+        let storedStatus: TodoStatus = assessment.status == .inProgress ? .inProgress
+            : assessment.status == .waiting ? .waiting : .open
         let todo = Todo(
             threadKey: canonicalKey,
             title: summary.title,
@@ -672,10 +609,6 @@ final class SyncWorker {
     /// signal), at or above it becomes a real todo. Favours recall — borderline
     /// items that don't pan out get cleaned by auto-close.
     static let createBar = 0.6
-
-    /// Reacting to a message with this emoji flags it for Sift — it becomes a
-    /// todo regardless of the confidence bar.
-    static let reactionTrigger = "eyes"
 
     /// Largest group the clustering pass will merge in one go. A genuine work
     /// item rarely spans more than 2–3 threads; a bigger group almost always
