@@ -311,18 +311,82 @@ enum SlackText {
 
     static func attributed(_ raw: String, names: [String: String]) -> AttributedString {
         var out = AttributedString()
-        var idx = raw.startIndex
-        while idx < raw.endIndex {
-            if raw[idx] == "<", let close = raw[idx...].firstIndex(of: ">") {
-                let inner = String(raw[raw.index(after: idx)..<close])
-                out.append(renderAngle(inner, names: names))
-                idx = raw.index(after: close)
+        let chars = Array(raw)
+        var i = 0
+        var plainStart = 0
+        func flushPlain(_ end: Int) {
+            if plainStart < end { out.append(formatInline(String(chars[plainStart..<end]))) }
+        }
+        while i < chars.count {
+            let c = chars[i]
+            // Code spans win over Slack auto-links, so `<mailto:x@y|x@y>` inside
+            // backticks renders as literal code, not a link.
+            if c == "`", let close = nextIndex(of: "`", in: chars, after: i) {
+                flushPlain(i)
+                out.append(codeSegment(codeInnerText(String(chars[(i + 1)..<close]))))
+                i = close + 1; plainStart = i
+            } else if c == "<", let close = nextIndex(of: ">", in: chars, after: i) {
+                flushPlain(i)
+                out.append(renderAngle(String(chars[(i + 1)..<close]), names: names))
+                i = close + 1; plainStart = i
             } else {
-                let next = raw[raw.index(after: idx)...].firstIndex(of: "<") ?? raw.endIndex
-                out.append(formatInline(String(raw[idx..<next])))
-                idx = next
+                i += 1
             }
         }
+        flushPlain(chars.count)
+        return out
+    }
+
+    private static func nextIndex(of ch: Character, in chars: [Character], after i: Int) -> Int? {
+        var j = i + 1
+        while j < chars.count { if chars[j] == ch { return j }; j += 1 }
+        return nil
+    }
+
+    /// Shared style for inline `code` — monospaced with the same tinted
+    /// background as fenced code blocks, and thin-space padding so the highlight
+    /// isn't cramped.
+    static func codeSegment(_ inner: String) -> AttributedString {
+        var seg = AttributedString("\u{2009}\(inner)\u{2009}")
+        seg.inlinePresentationIntent = .code
+        seg.foregroundColor = Color.primary.opacity(0.85)
+        seg.backgroundColor = Color.primary.opacity(0.06)
+        return seg
+    }
+
+    /// The display text of inline code, unwrapping a Slack auto-link (e.g. an
+    /// emailed address arrives as `<mailto:x@y|x@y>`).
+    private static func codeInnerText(_ s: String) -> String {
+        var t = s
+        if t.hasPrefix("<"), t.hasSuffix(">") {
+            let body = String(t.dropFirst().dropLast())
+            let parts = body.split(separator: "|", maxSplits: 1).map(String.init)
+            t = parts.count > 1 ? parts[1] : (parts.first ?? body)
+            if t.hasPrefix("mailto:") { t = String(t.dropFirst("mailto:".count)) }
+        }
+        return unescape(t)
+    }
+
+    /// Style `code` spans in plain (non-Slack) text — todo titles and summaries.
+    static func inlineCodeStyled(_ text: String) -> AttributedString {
+        guard text.contains("`") else { return AttributedString(text) }
+        var out = AttributedString()
+        let chars = Array(text)
+        var i = 0
+        var plainStart = 0
+        func flush(_ end: Int) {
+            if plainStart < end { out.append(AttributedString(String(chars[plainStart..<end]))) }
+        }
+        while i < chars.count {
+            if chars[i] == "`", let close = nextIndex(of: "`", in: chars, after: i) {
+                flush(i)
+                out.append(codeSegment(String(chars[(i + 1)..<close])))
+                i = close + 1; plainStart = i
+            } else {
+                i += 1
+            }
+        }
+        flush(chars.count)
         return out
     }
 
@@ -360,9 +424,10 @@ enum SlackText {
         return a
     }
 
-    /// Apply `*bold*`, `_italic_`, `~strike~`, `\`code\`` to a plain span and
-    /// unescape entities. Markers must hug their content (no inner whitespace)
-    /// and the opener must sit on a word boundary, so `2 * 3` stays literal.
+    /// Apply `*bold*`, `_italic_`, `~strike~` to a plain span and unescape
+    /// entities. Markers must hug their content (no inner whitespace) and the
+    /// opener must sit on a word boundary, so `2 * 3` stays literal. (Inline
+    /// `code` is handled earlier in `attributed()`.)
     private static func formatInline(_ span: String) -> AttributedString {
         let chars = Array(span)
         var out = AttributedString()
@@ -378,8 +443,7 @@ enum SlackText {
                let close = closer(chars, open: i, marker: c) {
                 flush()
                 let inner = unescape(String(chars[(i + 1)..<close]))
-                // Don't emojify inside inline code — it's meant to be literal.
-                var seg = AttributedString(intent == .code ? inner : emojify(inner))
+                var seg = AttributedString(emojify(inner))
                 seg.inlinePresentationIntent = intent
                 out.append(seg)
                 i = close + 1
@@ -397,7 +461,6 @@ enum SlackText {
         case "*": return .stronglyEmphasized
         case "_": return .emphasized
         case "~": return .strikethrough
-        case "`": return .code
         default: return nil
         }
     }
@@ -546,7 +609,7 @@ struct TodoDetailSheet: View {
     /// Fixed header: just the title (up to two lines, then truncated), centred
     /// vertically. Closing is via click-outside or Esc — no close button.
     private var header: some View {
-        Text(todo.title.redacting(settings.redactionEnabled))
+        Text(SlackText.inlineCodeStyled(todo.title.redacting(settings.redactionEnabled)))
             .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
             .foregroundStyle(Color.primary)
             .lineLimit(2)
@@ -561,7 +624,7 @@ struct TodoDetailSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if !todo.summary.isEmpty {
-                    Text(todo.displaySummary.redacting(settings.redactionEnabled))
+                    Text(SlackText.inlineCodeStyled(todo.displaySummary.redacting(settings.redactionEnabled)))
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

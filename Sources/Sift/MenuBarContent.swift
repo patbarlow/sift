@@ -543,7 +543,7 @@ struct ArchivedRow: View {
                                      : InProgressBadge.adaptiveGreen.opacity(0.85))
                     .frame(width: 16)
                     .padding(.trailing, 6)
-                Text(todo.title.redacting(settings.redactionEnabled))
+                Text(SlackText.inlineCodeStyled(todo.title.redacting(settings.redactionEnabled)))
                     .font(settings.titleFont())
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -939,7 +939,7 @@ struct IssueRow: View {
                         .font(.system(size: 13, weight: .semibold))
                         .help("High priority")
                 }
-                Text(todo.title.redacting(settings.redactionEnabled))
+                Text(SlackText.inlineCodeStyled(todo.title.redacting(settings.redactionEnabled)))
                     .font(settings.titleFont())
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -955,7 +955,7 @@ struct IssueRow: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 if !todo.summary.isEmpty {
-                    Text(todo.displaySummary.redacting(settings.redactionEnabled))
+                    Text(SlackText.inlineCodeStyled(todo.displaySummary.redacting(settings.redactionEnabled)))
                         .font(settings.summaryFont())
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
