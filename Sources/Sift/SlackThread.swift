@@ -343,12 +343,12 @@ enum SlackText {
         return nil
     }
 
-    /// Shared style for inline `code` — monospaced with the same tinted
-    /// background as fenced code blocks, and thin-space padding so the highlight
-    /// isn't cramped.
-    static func codeSegment(_ inner: String) -> AttributedString {
-        var seg = AttributedString("\u{2009}\(inner)\u{2009}")
-        seg.inlinePresentationIntent = .code
+    /// Shared style for inline `code` — the same tinted background as fenced
+    /// code blocks, monospaced at the SAME size as the surrounding text (pass
+    /// the surrounding font's monospaced variant so it doesn't render larger).
+    static func codeSegment(_ inner: String, font: Font = .system(size: 13, design: .monospaced)) -> AttributedString {
+        var seg = AttributedString(inner)
+        seg.font = font
         seg.foregroundColor = Color.primary.opacity(0.85)
         seg.backgroundColor = Color.primary.opacity(0.06)
         return seg
@@ -368,7 +368,8 @@ enum SlackText {
     }
 
     /// Style `code` spans in plain (non-Slack) text — todo titles and summaries.
-    static func inlineCodeStyled(_ text: String) -> AttributedString {
+    /// Pass the surrounding text's font so code matches its size.
+    static func inlineCodeStyled(_ text: String, font: Font) -> AttributedString {
         guard text.contains("`") else { return AttributedString(text) }
         var out = AttributedString()
         let chars = Array(text)
@@ -380,7 +381,7 @@ enum SlackText {
         while i < chars.count {
             if chars[i] == "`", let close = nextIndex(of: "`", in: chars, after: i) {
                 flush(i)
-                out.append(codeSegment(String(chars[(i + 1)..<close])))
+                out.append(codeSegment(String(chars[(i + 1)..<close]), font: font))
                 i = close + 1; plainStart = i
             } else {
                 i += 1
@@ -609,7 +610,7 @@ struct TodoDetailSheet: View {
     /// Fixed header: just the title (up to two lines, then truncated), centred
     /// vertically. Closing is via click-outside or Esc — no close button.
     private var header: some View {
-        Text(SlackText.inlineCodeStyled(todo.title.redacting(settings.redactionEnabled)))
+        Text(SlackText.inlineCodeStyled(todo.title.redacting(settings.redactionEnabled), font: .system(size: 16, design: .monospaced)))
             .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
             .foregroundStyle(Color.primary)
             .lineLimit(2)
@@ -624,7 +625,7 @@ struct TodoDetailSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if !todo.summary.isEmpty {
-                    Text(SlackText.inlineCodeStyled(todo.displaySummary.redacting(settings.redactionEnabled)))
+                    Text(SlackText.inlineCodeStyled(todo.displaySummary.redacting(settings.redactionEnabled), font: .system(size: 13, design: .monospaced)))
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
