@@ -461,45 +461,6 @@ actor SlackClient {
         return all
     }
 
-    struct DMChannel {
-        let id: String
-        let userID: String?   // the other person (nil for group DMs)
-        let isGroup: Bool
-    }
-
-    /// List the user's open DMs and group DMs. Requires `im:read` / `mpim:read`.
-    func listDMs() async throws -> [DMChannel] {
-        var all: [DMChannel] = []
-        var cursor: String? = nil
-        var pages = 0
-        repeat {
-            var params: [URLQueryItem] = [
-                URLQueryItem(name: "types", value: "im,mpim"),
-                URLQueryItem(name: "limit", value: "200"),
-            ]
-            if let c = cursor, !c.isEmpty {
-                params.append(URLQueryItem(name: "cursor", value: c))
-            }
-            struct C: Decodable { let id: String; let user: String?; let is_mpim: Bool? }
-            struct Resp: Decodable {
-                let ok: Bool
-                let error: String?
-                let channels: [C]?
-                let response_metadata: Meta?
-                struct Meta: Decodable { let next_cursor: String? }
-            }
-            let resp: Resp = try await get("conversations.list", params)
-            if !resp.ok { throw SlackError.apiError(resp.error ?? "unknown") }
-            all.append(contentsOf: (resp.channels ?? []).map {
-                DMChannel(id: $0.id, userID: $0.user, isGroup: $0.is_mpim == true)
-            })
-            let next = resp.response_metadata?.next_cursor ?? ""
-            cursor = next.isEmpty ? nil : next
-            pages += 1
-        } while cursor != nil && pages < 10
-        return all
-    }
-
     // MARK: - HTTP plumbing
 
     private func get<T: Decodable>(_ path: String, _ params: [URLQueryItem]) async throws -> T {

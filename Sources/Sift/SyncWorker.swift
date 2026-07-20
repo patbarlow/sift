@@ -16,7 +16,6 @@ final class SyncWorker {
     struct Report: Sendable {
         var newMentions: Int = 0
         var newFromWatchedChannels: Int = 0
-        var newFromDMs: Int = 0
         var refreshed: Int = 0
         var autoClosed: Int = 0
         var movedInProgress: Int = 0
@@ -85,7 +84,6 @@ final class SyncWorker {
         do {
             try await scanMentions(ctx: ctx, report: &report)
             try await scanWatchedChannels(ctx: ctx, report: &report)
-            try await scanDMs(ctx: ctx, report: &report)
             try await scanParticipantThreads(ctx: ctx, report: &report)
             if granola != nil {
                 try await scanGranolaMeetings(ctx: ctx, report: &report)
@@ -95,7 +93,7 @@ final class SyncWorker {
             archiveStaleTodos(ctx: ctx, report: &report)
             // Only cluster when this run actually added todos — avoids
             // re-running an expensive LLM pass over an unchanged list.
-            let addedThisRun = report.newMentions + report.newFromWatchedChannels + report.newFromDMs
+            let addedThisRun = report.newMentions + report.newFromWatchedChannels
             if addedThisRun > 0 {
                 await consolidateOpenTodos(ctx: ctx, report: &report)
             }
@@ -341,19 +339,15 @@ final class SyncWorker {
         }()
 
         var latestTs: String = cursor
-        var seenDMChannels: Set<String> = []
         for match in matches {
             if match.user == settings.slackUserID { continue }
             if (match.text ?? "").isEmpty { continue }
             if ignoredIDs.contains(match.channel.id) { continue }
             if compareTs(match.ts, latestTs) > 0 { latestTs = match.ts }
 
-            // A DM is one conversation, not one-todo-per-message.
-            let isDM = Self.isDMChannel(match.channel.id)
-            if isDM {
-                if seenDMChannels.contains(match.channel.id) { continue }
-                if openTodoExists(channelID: match.channel.id, ctx: ctx) { continue }
-            }
+            // DMs are not ingested — flat conversations have no thread
+            // boundaries, so a DM todo resurfaced stale/unrelated asks.
+            if Self.isDMChannel(match.channel.id) { continue }
 
             let parentTs = match.threadParentTs
             let threadKey = "\(match.channel.id):\(parentTs)"
@@ -375,7 +369,6 @@ final class SyncWorker {
                 ) else { continue }
                 if outcome.mergedInto == nil {
                     ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
-                    if isDM { seenDMChannels.insert(match.channel.id) }
                     report.newMentions += 1
                     if outcome.todo.statusEnum == .inProgress {
                         report.movedInProgress += 1
@@ -447,73 +440,6 @@ final class SyncWorker {
     }
 
     // MARK: - Ingest: direct messages
-
-    /// Scan 1:1 and group DMs for incoming asks. The mention search and
-    /// participant search don't surface DMs, so without this an inbound DM
-    /// (where the user is neither @mentioned nor has replied yet) is never tracked.
-    /// Requires `im:read` / `mpim:read` to list conversations.
-    private func scanDMs(ctx: ModelContext, report: inout Report) async throws {
-        let dms: [SlackClient.DMChannel]
-        do {
-            dms = try await slack.listDMs()
-        } catch {
-            report.errors.append("dm list: \(error.localizedDescription)")
-            return
-        }
-        for dm in dms {
-            let cursorKey = "dm:\(dm.id)"
-            let cursor = readCursor(key: cursorKey, ctx: ctx) ?? defaultSlackTs()
-            let messages: [SlackClient.Message]
-            do {
-                messages = try await slack.conversationHistory(channelID: dm.id, after: cursor)
-            } catch {
-                // Closed / inaccessible DMs report channel_not_found — benign,
-                // just skip them rather than surfacing a scary error.
-                if !"\(error.localizedDescription)".contains("channel_not_found") {
-                    report.errors.append("dm history: \(error.localizedDescription)")
-                }
-                continue
-            }
-
-            // A DM is one flat conversation — model it as a single todo rather
-            // than one per message. Advance the cursor past everything seen,
-            // and only ingest if there's a new inbound message AND no open todo
-            // already tracks this DM (its refresh handles ongoing updates).
-            let inbound = messages
-                .filter { !$0.isFromBot && $0.user != settings.slackUserID }
-                .filter { ($0.thread_ts == nil || $0.thread_ts == $0.ts) }
-                .sorted { compareTs($0.ts, $1.ts) < 0 }
-            if let latest = messages.map(\.ts).max(by: { compareTs($0, $1) < 0 }) {
-                writeCursor(key: cursorKey, value: latest, ctx: ctx)
-            }
-            guard let firstAsk = inbound.first else { continue }
-            if openTodoExists(channelID: dm.id, ctx: ctx) { continue }
-
-            let threadKey = "\(dm.id):\(firstAsk.ts)"
-            if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
-            if await routeToMergedWorkItem(threadKey: threadKey, ctx: ctx, report: &report) { continue }
-            do {
-                let resolved = await resolveChannelName(channelID: dm.id, fallback: nil)
-                guard let outcome = try await ingestCandidate(
-                    threadKey: threadKey,
-                    channelID: dm.id,
-                    channelName: resolved,
-                    parentTs: firstAsk.ts,
-                    fallbackPermalink: nil,
-                    ctx: ctx
-                ) else { continue }
-                if outcome.mergedInto == nil {
-                    ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
-                    report.newFromDMs += 1
-                    if outcome.todo.statusEnum == .inProgress {
-                        report.movedInProgress += 1
-                    }
-                }
-            } catch {
-                report.errors.append("ingest dm: \(error.localizedDescription)")
-            }
-        }
-    }
 
     /// Shared ingest pipeline. Fetches the full thread, resolves names,
     /// assesses status, and either creates a todo (open / in_progress) or
@@ -1132,7 +1058,6 @@ final class SyncWorker {
 
         // Dedup by thread parent.
         var seenThreads: Set<String> = []
-        var seenDMChannels: Set<String> = []
         var latestTs: String = cursor
         for match in matches {
             if compareTs(match.ts, latestTs) > 0 { latestTs = match.ts }
@@ -1140,12 +1065,8 @@ final class SyncWorker {
             let threadKey = "\(match.channel.id):\(parentTs)"
             if !seenThreads.insert(threadKey).inserted { continue }
 
-            // A DM is one conversation, not one-todo-per-message.
-            let isDM = Self.isDMChannel(match.channel.id)
-            if isDM {
-                if seenDMChannels.contains(match.channel.id) { continue }
-                if openTodoExists(channelID: match.channel.id, ctx: ctx) { continue }
-            }
+            // DMs are not ingested (see scanMentions).
+            if Self.isDMChannel(match.channel.id) { continue }
 
             // If a todo already exists, refresh pass will handle it.
             if existingTodo(threadKey: threadKey, ctx: ctx) != nil { continue }
@@ -1166,7 +1087,6 @@ final class SyncWorker {
                 ) else { continue }
                 if outcome.mergedInto == nil {
                     ctx.insert(outcome.todo); Activity.log(.created, outcome.todo.title, ctx: ctx)
-                    if isDM { seenDMChannels.insert(match.channel.id) }
                     report.newMentions += 1
                     if outcome.todo.statusEnum == .inProgress {
                         report.movedInProgress += 1
@@ -1200,6 +1120,11 @@ final class SyncWorker {
         }
 
         for todo in open {
+            // DMs are no longer tracked — don't refresh existing DM todos either,
+            // so unrelated new DM chat can't resurface them. They age out via the
+            // stale/archive sweep.
+            if Self.isDMChannel(todo.channelID) { continue }
+
             // Snoozed: parked until a wake condition. Don't assess until then.
             if todo.isSnoozed {
                 if await wakeSnoozed(todo) {
@@ -2414,12 +2339,6 @@ final class SyncWorker {
         return (try? ctx.fetch(FetchDescriptor<TodoSource>(predicate: pred)).first) != nil
     }
 
-    /// Whether an open/in-progress todo already tracks this channel (used to
-    /// keep a DM to a single active todo rather than one per message).
-    private func openTodoExists(channelID: String, ctx: ModelContext) -> Bool {
-        let pred = #Predicate<Todo> { $0.channelID == channelID && $0.status != "done" && $0.status != "archived" }
-        return (try? ctx.fetch(FetchDescriptor<Todo>(predicate: pred)).first) != nil
-    }
 
     /// If this thread was previously merged into a work item, route the new
     /// activity to that work item instead of spawning a duplicate todo: refresh
