@@ -160,7 +160,7 @@ enum LLMProviderKind: String, CaseIterable, Identifiable {
 
     var defaultSmartModel: String {
         switch self {
-        case .anthropic: return "claude-sonnet-4-5"
+        case .anthropic: return "claude-sonnet-5"
         case .openai: return "gpt-4o"
         case .gemini: return "gemini-2.5-pro"
         case .groq: return "llama-3.3-70b-versatile"
