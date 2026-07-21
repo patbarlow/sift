@@ -369,8 +369,31 @@ extension Todo {
         let phrase = dueDate.map { Todo.relativeDayPhrase(for: $0) } ?? "soon"
         return text.replacingOccurrences(of: "{due}", with: phrase)
     }
-    var displaySummary: String { fillingDates(summary) }
-    var displayPriorityReason: String? { priorityReason.map { fillingDates($0) } }
+
+    /// The summariser model sometimes appends a stray closing quote after the
+    /// final sentence (e.g. `…on your end.'`). Strip an unmatched trailing quote
+    /// without touching apostrophes inside words or balanced quoted phrases.
+    static func trimStrayQuote(_ text: String) -> String {
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let doubles: Set<Character> = ["\"", "\u{201C}", "\u{201D}"]
+        let singles: Set<Character> = ["'", "\u{2018}", "\u{2019}", "`"]
+        while let last = t.last {
+            if doubles.contains(last) {
+                // Only strip when unmatched (odd count) — leaves `"lk_solved"` intact.
+                guard t.filter({ doubles.contains($0) }).count % 2 == 1 else { break }
+                t.removeLast()
+            } else if singles.contains(last), let prev = t.dropLast().last, ".!?".contains(prev) {
+                // A single quote trailing sentence punctuation is stray, not a word's apostrophe.
+                t.removeLast()
+            } else { break }
+            t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return t
+    }
+
+    var displayTitle: String { Todo.trimStrayQuote(fillingDates(title)) }
+    var displaySummary: String { Todo.trimStrayQuote(fillingDates(summary)) }
+    var displayPriorityReason: String? { priorityReason.map { Todo.trimStrayQuote(fillingDates($0)) } }
     var classificationEnum: TodoClassification {
         TodoClassification(rawValue: classification) ?? .todo
     }

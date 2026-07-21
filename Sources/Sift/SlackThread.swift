@@ -610,7 +610,7 @@ struct TodoDetailSheet: View {
     /// Fixed header: just the title (up to two lines, then truncated), centred
     /// vertically. Closing is via click-outside or Esc — no close button.
     private var header: some View {
-        Text(SlackText.inlineCodeStyled(todo.title.redacting(settings.redactionEnabled), font: .system(size: 16, design: .monospaced)))
+        Text(SlackText.inlineCodeStyled(todo.displayTitle.redacting(settings.redactionEnabled), font: .system(size: 16, design: .monospaced)))
             .font(.system(size: 16, weight: .semibold, design: settings.theme.fontDesign))
             .foregroundStyle(Color.primary)
             .lineLimit(2)
