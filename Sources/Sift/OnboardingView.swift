@@ -339,6 +339,14 @@ private struct AISetupSlide: View {
 
     private var connected: Bool { settings.fastProvider.isConnected() }
 
+    private func saveKey() {
+        let key = llmKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        Keychain.write(key, for: settings.fastProvider.keychainKey)
+        llmKey = ""
+        state.refreshConfigured()
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             ObSidePanel(
@@ -376,14 +384,10 @@ private struct AISetupSlide: View {
                     HStack(spacing: 8) {
                         SecureField(settings.fastProvider.keyPlaceholder, text: $llmKey)
                             .textFieldStyle(.roundedBorder)
-                        Button(connected ? "Replace" : "Save") {
-                            let key = llmKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !key.isEmpty else { return }
-                            Keychain.write(key, for: settings.fastProvider.keychainKey)
-                            llmKey = ""
-                            state.refreshConfigured()
-                        }
-                        .disabled(llmKey.isEmpty)
+                            .onSubmit(saveKey)
+                        ObButton(connected ? "Replace" : "Save",
+                                 enabled: !llmKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                 action: saveKey)
                     }
                     .padding(.top, 6)
 
@@ -530,7 +534,7 @@ private struct SlackSetupSlide: View {
 
                 if showManualToken {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Create a Slack app at api.slack.com/apps with user token scopes: search:read, channels:read, channels:history, groups:read, groups:history, im:read, im:history, mpim:read, mpim:history, users:read, users:read.email.")
+                        Text("Create a Slack app at api.slack.com/apps with user token scopes: search:read, channels:read, channels:history, groups:read, groups:history, users:read, users:read.email, emoji:read, files:read.")
                             .font(.caption).foregroundStyle(Color.obText2)
                             .fixedSize(horizontal: false, vertical: true)
                         HStack(spacing: 8) {
@@ -632,18 +636,19 @@ private struct ObButton: View {
     var icon: String?
     var color: Color = .obTerra
     var fullWidth: Bool = false
+    var enabled: Bool = true
     let action: () -> Void
 
     @State private var hovering = false
 
     init(_ label: String, icon: String? = nil, color: Color = .obTerra,
-         fullWidth: Bool = false, action: @escaping () -> Void) {
+         fullWidth: Bool = false, enabled: Bool = true, action: @escaping () -> Void) {
         self.label = label; self.icon = icon; self.color = color
-        self.fullWidth = fullWidth; self.action = action
+        self.fullWidth = fullWidth; self.enabled = enabled; self.action = action
     }
 
     var body: some View {
-        Button(action: action) {
+        Button(action: { if enabled { action() } }) {
             HStack(spacing: 6) {
                 if let icon { Image(systemName: icon) }
                 Text(label)
@@ -653,13 +658,14 @@ private struct ObButton: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 11)
             .frame(maxWidth: fullWidth ? .infinity : nil)
-            .background(hovering ? color.opacity(0.82) : color,
+            .background(enabled ? (hovering ? color.opacity(0.82) : color)
+                                : color.opacity(0.3),
                         in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .onHover { over in
-            hovering = over
-            over ? NSCursor.pointingHand.push() : NSCursor.pop()
+            hovering = over && enabled
+            (over && enabled) ? NSCursor.pointingHand.push() : NSCursor.pop()
         }
     }
 }
