@@ -324,7 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             win.titlebarAppearsTransparent = true
             win.titleVisibility = .hidden
             win.isReleasedWhenClosed = false
-            win.level = .floating
+            win.level = .normal
             win.contentView = host
             NotificationCenter.default.addObserver(self, selector: #selector(realWindowClosed),
                                                    name: NSWindow.willCloseNotification, object: win)
